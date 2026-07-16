@@ -1,0 +1,17 @@
+{
+  "_comentario": "Cada empresa do OMIE tem seu proprio par app_key/app_secret. Para adicionar mais empresas, copie o bloco abaixo dentro da lista 'empresas'. O campo 'id' deve ser unico (sem espacos). 'nome' e apenas um rotulo amigavel; a razao social oficial e buscada do OMIE na sincronizacao.",
+  "empresas": [
+    {
+      "id": "roi",
+      "nome": "ROI Participações",
+      "app_key": "SEU_APP_KEY_AQUI",
+      "app_secret": "SEU_APP_SECRET_AQUI"
+    },
+    {
+      "id": "segunda-empresa",
+      "nome": "Segunda Empresa",
+      "app_key": "APP_KEY_DA_SEGUNDA",
+      "app_secret": "APP_SECRET_DA_SEGUNDA"
+    }
+  ]
+}

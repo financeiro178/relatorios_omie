@@ -1,0 +1,2 @@
+# Este projeto usa SOMENTE a biblioteca padrão do Python — nenhuma dependência externa.
+# O arquivo existe para o Render detectar o runtime Python e rodar o build sem erro.

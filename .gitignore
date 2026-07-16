@@ -1,0 +1,14 @@
+# Credenciais (NUNCA versionar) — contem app_secret do OMIE
+config.json
+
+# Banco local sincronizado (dados reais + hashes de senha)
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+
+# Sondas/temporarios
+_probe*.py

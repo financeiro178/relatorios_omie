@@ -1,0 +1,26 @@
+# Blueprint do Render — cria o serviço web + disco persistente automaticamente.
+# No Render: New > Blueprint > aponte para este repositório.
+services:
+  - type: web
+    name: relatorios-omie
+    runtime: python
+    plan: starter          # o disco persistente exige plano pago (Starter). No Free os dados se perdem ao reiniciar.
+    region: oregon
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server.py"
+    healthCheckPath: /login
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: DATA_DIR          # onde o banco SQLite é gravado (= ponto de montagem do disco)
+        value: /var/data
+      - key: SESSAO_HORAS
+        value: "12"
+      - key: ADMIN_LOGIN
+        value: admin
+      - key: ADMIN_SENHA       # Render gera uma senha forte; veja em Environment para o 1º login
+        generateValue: true
+    disk:
+      name: dados
+      mountPath: /var/data
+      sizeGB: 1

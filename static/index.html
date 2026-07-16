@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Análise Financeira OMIE</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230a0a0b'/><text x='50' y='71' font-size='62' fill='white' text-anchor='middle' font-family='Georgia,serif' font-weight='bold'>A</text></svg>">
+</head>
+<body>
+  <div class="app">
+    <!-- ================= SIDEBAR ================= -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="logo" style="font-family:Georgia,serif;font-size:20px">A</div>
+        <div>
+          <div class="nome">Análise Financeira</div>
+          <div class="tag">Relatórios OMIE</div>
+        </div>
+      </div>
+      <nav class="nav" id="nav">
+        <div class="grupo-label">Relatórios</div>
+        <!-- preenchido por JS -->
+      </nav>
+      <div class="side-foot">
+        <div class="sync-card" id="syncCard">Carregando…</div>
+      </div>
+    </aside>
+
+    <!-- ================= MAIN ================= -->
+    <div class="main-wrap">
+      <header class="topbar">
+        <button class="icon-btn menu-toggle" id="menuToggle" title="Menu"></button>
+        <div class="titulo-pagina">
+          <h1 id="pageTitle">Visão Geral</h1>
+          <div class="contexto" id="pageContext">—</div>
+        </div>
+        <div class="top-actions">
+          <div class="empresas-sel" id="empresasSel"></div>
+          <button class="icon-btn" id="btnImprimir" title="Imprimir / PDF"></button>
+          <button class="icon-btn" id="btnExportar" title="Exportar CSV (Excel)"></button>
+          <button class="btn" id="btnSync"><span id="btnSyncIco"></span> Sincronizar</button>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <div class="toolbar-linha">
+          <div class="campo">
+            <label>Tipo</label>
+            <select id="fTipo">
+              <option value="ambos">Pagar + Receber</option>
+              <option value="receber">Somente a Receber</option>
+              <option value="pagar">Somente a Pagar</option>
+            </select>
+          </div>
+          <div class="campo">
+            <label>Pela data de</label>
+            <select id="fCampoData">
+              <option value="vencimento">Vencimento</option>
+              <option value="emissao">Emissão</option>
+              <option value="previsao">Previsão</option>
+              <option value="registro">Registro/Entrada</option>
+            </select>
+          </div>
+          <div class="campo">
+            <label>Período</label>
+            <div class="segmented" id="segPeriodo">
+              <button data-p="" class="ativa">Tudo</button>
+              <button data-p="mes">Mês</button>
+              <button data-p="mes_ant">Mês ant.</button>
+              <button data-p="ano">Ano</button>
+              <button data-p="ano_ant">Ano ant.</button>
+              <button data-p="custom">Personalizado</button>
+            </div>
+          </div>
+          <div class="campo" id="campoDe" style="display:none"><label>De</label><input type="date" id="fDe"></div>
+          <div class="campo" id="campoAte" style="display:none"><label>Até</label><input type="date" id="fAte"></div>
+          <div class="campo"><label>Conta bancária</label><div class="multi" id="mContas"></div></div>
+          <div class="campo"><label>Status</label><div class="multi" id="mStatus"></div></div>
+          <div class="campo"><label>Categoria</label><div class="multi" id="mCategorias"></div></div>
+          <div class="campo busca">
+            <label>Buscar</label>
+            <span></span>
+            <input type="text" id="fBusca" placeholder="documento, cliente, categoria…">
+          </div>
+        </div>
+        <div class="chips-ativos" id="chipsAtivos"></div>
+      </section>
+
+      <main id="conteudo"></main>
+    </div>
+  </div>
+
+  <div class="barra-sync" id="barraSync">
+    <span class="spinner"></span>
+    <span class="txt" id="syncMsg">Sincronizando…</span>
+    <div class="prog"><i id="syncProg"></i></div>
+    <span class="pct" id="syncPct">0%</span>
+  </div>
+  <div class="tooltip" id="tooltip"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
