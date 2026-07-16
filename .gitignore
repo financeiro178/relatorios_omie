@@ -1,5 +1,6 @@
 # Credenciais (NUNCA versionar) — contem app_secret do OMIE
-config.json
+config*.json
+!config.example.json
 
 # Banco local sincronizado (dados reais + hashes de senha)
 *.db

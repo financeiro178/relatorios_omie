@@ -83,17 +83,31 @@ def bootstrap():
         except Exception as ex:  # noqa: BLE001
             print(" Aviso: falha ao importar banco antigo:", ex)
 
-    # 2) importa credenciais do config.json para o banco (apenas se vazio)
-    if not db.listar_credenciais() and os.path.exists(CONFIG_PATH):
-        try:
-            cfg = json.load(open(CONFIG_PATH, encoding="utf-8"))
-            for e in cfg.get("empresas", []):
-                if e.get("app_key") and e.get("app_secret"):
-                    eid = e.get("id") or slug(e.get("nome") or e["app_key"])
-                    db.salvar_credencial(eid, e.get("nome") or eid, e["app_key"], e["app_secret"], agora())
-            print(" config.json importado para o banco.")
-        except Exception as ex:  # noqa: BLE001
-            print(" Aviso: falha ao importar config.json:", ex)
+    # 2) importa credenciais para o banco (apenas se ainda nao tem nenhuma):
+    #    - arquivo config.json (uso local)
+    #    - variavel de ambiente CONFIG_JSON, mesmo formato do arquivo (nuvem SEM disco
+    #      persistente, ex. Render Free: as credenciais voltam sozinhas a cada restart)
+    if not db.listar_credenciais():
+        cfg, origem = None, None
+        if os.path.exists(CONFIG_PATH):
+            try:
+                cfg, origem = json.load(open(CONFIG_PATH, encoding="utf-8")), "config.json"
+            except Exception as ex:  # noqa: BLE001
+                print(" Aviso: falha ao ler config.json:", ex)
+        elif os.environ.get("CONFIG_JSON"):
+            try:
+                cfg, origem = json.loads(os.environ["CONFIG_JSON"]), "variavel CONFIG_JSON"
+            except Exception as ex:  # noqa: BLE001
+                print(" Aviso: CONFIG_JSON invalida:", ex)
+        if cfg:
+            try:
+                for e in cfg.get("empresas", []):
+                    if e.get("app_key") and e.get("app_secret"):
+                        eid = e.get("id") or slug(e.get("nome") or e["app_key"])
+                        db.salvar_credencial(eid, e.get("nome") or eid, e["app_key"], e["app_secret"], agora())
+                print(" Credenciais importadas de %s." % origem)
+            except Exception as ex:  # noqa: BLE001
+                print(" Aviso: falha ao importar credenciais:", ex)
 
     # 3) garante um usuario admin
     if db.contar_usuarios() == 0:

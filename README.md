@@ -42,16 +42,30 @@ O OMIE da ROI é consolidado: as contas correntes têm prefixo `[Empresa]` no no
 (ex.: `[Gibraltar] Bradesco`). O app divide os títulos por **empresa real** automaticamente
 (`holding.py`), então cada empresa aparece separada nos relatórios e filtros.
 
-## Deploy no Render (web service)
+## Deploy no Render (web service, plano Free)
 
-O repositório inclui um `render.yaml` (Blueprint): no Render, **New → Blueprint** e aponte
-para este repositório. Ele cria o web service (`python server.py`) com disco persistente
-de 1 GB montado em `/var/data` (variável `DATA_DIR`), onde fica o SQLite.
+No Render: **New → Web Service** → conecte este repositório e preencha:
 
-- `ADMIN_SENHA` é gerada pelo Render — veja em *Environment* para o primeiro login (`admin`).
-- Na nuvem não há `config.json` nem banco para importar: após o primeiro login, cadastre as
-  credenciais OMIE em **Administração → + Nova conta OMIE** e clique em **Sincronizar**.
-- Plano Free não tem disco persistente (dados se perdem a cada restart); use Starter ou superior.
+| Campo | Valor |
+|---|---|
+| Runtime | Python |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `python server.py` |
+| Instance Type | Free |
+
+Variáveis de ambiente (*Environment*):
+
+- `ADMIN_LOGIN` = `admin` e `ADMIN_SENHA` = uma senha forte à sua escolha (recria o admin a cada restart);
+- `CONFIG_JSON` = o JSON das credenciais OMIE, no formato do `config.example.json`, em uma
+  linha só (**recomendado no Free**: faz as credenciais voltarem sozinhas a cada restart);
+- `PYTHON_VERSION` = `3.12.6` e `SESSAO_HORAS` = `12` (opcionais).
+
+**Atenção (Free):** sem disco persistente, o banco SQLite zera a cada deploy/restart e o
+serviço hiberna após ~15 min sem uso (primeiro acesso demora ~1 min). Com `ADMIN_SENHA` +
+`CONFIG_JSON` definidos, basta entrar e clicar em **Sincronizar** para repopular tudo direto
+do OMIE. Usuários extras criados na Administração também se perdem no restart — no Free,
+prefira usar só o admin. Se migrar para plano pago, o `render.yaml` (Blueprint) cria o
+serviço com disco persistente e nada se perde.
 
 ## Segurança
 

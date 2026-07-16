@@ -1,10 +1,29 @@
-# Blueprint do Render — cria o serviço web + disco persistente automaticamente.
-# No Render: New > Blueprint > aponte para este repositório.
+# Referência de configuração para o Render (deploy MANUAL, sem Blueprint):
+#   New → Web Service → conectar este repositório e preencher:
+#     Runtime:        Python
+#     Build Command:  pip install -r requirements.txt
+#     Start Command:  python server.py
+#     Instance Type:  Free
+#   Environment (variáveis):
+#     PYTHON_VERSION = 3.12.6
+#     ADMIN_LOGIN    = admin
+#     ADMIN_SENHA    = (escolha uma senha forte — recria o admin a cada restart)
+#     SESSAO_HORAS   = 12
+#     CONFIG_JSON    = (opcional, recomendado no Free: JSON no formato do
+#                       config.example.json com as credenciais OMIE; faz as
+#                       credenciais voltarem sozinhas a cada restart)
+#
+# ATENÇÃO (plano Free): não há disco persistente — o banco SQLite é apagado a cada
+# deploy/restart. Com ADMIN_SENHA + CONFIG_JSON definidos, basta clicar em
+# "Sincronizar" após o restart para repopular tudo direto do OMIE.
+# O serviço Free hiberna após ~15 min sem uso; o primeiro acesso demora ~1 min.
+#
+# Se um dia migrar para plano pago, o blueprint abaixo cria tudo com disco persistente:
 services:
   - type: web
     name: relatorios-omie
     runtime: python
-    plan: starter          # o disco persistente exige plano pago (Starter). No Free os dados se perdem ao reiniciar.
+    plan: starter          # o disco persistente exige plano pago
     region: oregon
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python server.py"
