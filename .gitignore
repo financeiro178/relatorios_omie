@@ -13,3 +13,6 @@ __pycache__/
 
 # Sondas/temporarios
 _probe*.py
+
+# Variaveis de deploy (contem segredos)
+*.env
