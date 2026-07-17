@@ -98,6 +98,25 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
     resumo["categorias"] = len(linhas)
     passo("%d categorias." % len(linhas))
 
+    # 3b) Departamentos (centros de custo)
+    passo("Buscando departamentos...")
+    try:
+        deps = cli.listar_tudo("geral/departamentos/", "ListarDepartamentos", {},
+                               "departamentos", registros_por_pagina=500)
+    except OmieError:
+        deps = []
+    linhas = [{
+        "empresa_id": empresa_id,
+        "codigo": str(d.get("codigo")),
+        "descricao": d.get("descricao") or "",
+        "estrutura": d.get("estrutura") or "",
+        "inativo": d.get("inativo") or "N",
+    } for d in deps if d.get("codigo")]
+    db.substituir("departamento", empresa_id, linhas,
+                  ["empresa_id", "codigo", "descricao", "estrutura", "inativo"])
+    resumo["departamentos"] = len(linhas)
+    passo("%d departamentos." % len(linhas))
+
     # 4) Clientes / fornecedores
     passo("Buscando clientes e fornecedores...")
     try:
@@ -132,6 +151,7 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
     )
     linhas = [_mapear_titulo(empresa_id, "pagar", t, mapa_cc) for t in pagar]
     db.substituir_titulos(empresa_id, "pagar", linhas, _COLUNAS_TITULO)
+    db.substituir_rateio(empresa_id, "pagar", _mapear_rateios(empresa_id, "pagar", pagar))
     resumo["contas_a_pagar"] = len(linhas)
     passo("%d contas a pagar." % len(linhas))
 
@@ -145,6 +165,7 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
     )
     linhas = [_mapear_titulo(empresa_id, "receber", t, mapa_cc) for t in receber]
     db.substituir_titulos(empresa_id, "receber", linhas, _COLUNAS_TITULO)
+    db.substituir_rateio(empresa_id, "receber", _mapear_rateios(empresa_id, "receber", receber))
     resumo["contas_a_receber"] = len(linhas)
     passo("%d contas a receber." % len(linhas))
 
@@ -195,6 +216,31 @@ _COLUNAS_TITULO = [
     "data_emissao", "data_vencimento", "data_previsao", "data_registro",
     "valor", "status", "observacao",
 ]
+
+
+def _mapear_rateios(empresa_id, tipo, titulos):
+    """Extrai o rateio por departamento de cada titulo (campos cCodDep/nValDep/nPerDep).
+    Fatias repetidas do mesmo departamento num titulo sao somadas (PK unica)."""
+    fatias = {}
+    for t in titulos:
+        cod_tit = t.get("codigo_lancamento_omie")
+        if not cod_tit:
+            continue
+        for d in (t.get("departamentos") or t.get("distribuicao") or []):
+            cod_dep = str(d.get("cCodDep") or "").strip()
+            if not cod_dep:
+                continue
+            chave = (cod_tit, cod_dep)
+            if chave in fatias:
+                fatias[chave]["valor"] += num(d.get("nValDep"))
+                fatias[chave]["percentual"] += num(d.get("nPerDep"))
+            else:
+                fatias[chave] = {
+                    "empresa_id": empresa_id, "tipo": tipo, "codigo": cod_tit,
+                    "cod_dep": cod_dep, "valor": num(d.get("nValDep")),
+                    "percentual": num(d.get("nPerDep")),
+                }
+    return list(fatias.values())
 
 
 def _mapear_titulo(empresa_id, tipo, t, mapa_cc=None):

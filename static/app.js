@@ -23,6 +23,7 @@ const ICONS = {
   shield: P('<path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/>'),
   logout: P('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>'),
   alvo: P('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.5"/>'),
+  predio: P('<path d="M3 21h18"/><path d="M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/>'),
 };
 const ic = (n) => ICONS[n] || "";
 
@@ -90,6 +91,7 @@ const VIEWS = [
   { id: "orcado", nome: "Previsto × Realizado", ico: "alvo" },
   { id: "fluxo", nome: "Fluxo de Caixa", ico: "flow" },
   { id: "categoria", nome: "Categorias", ico: "tag" },
+  { id: "departamento", nome: "Departamentos", ico: "predio" },
   { id: "conta", nome: "Contas", ico: "bank" },
   { id: "cliente", nome: "Clientes", ico: "users" },
   { id: "titulos", nome: "Títulos", ico: "list" },
@@ -491,7 +493,7 @@ async function renderFluxo() {
 // ===================================================== AGRUPADO (categoria/conta/cliente)
 async function renderAgrupado(por) {
   $(REL_ALVO).innerHTML = skeleton();
-  const colNome = { categoria: "Categoria", conta: "Conta Bancária", cliente: "Cliente/Fornecedor" };
+  const colNome = { categoria: "Categoria", conta: "Conta Bancária", cliente: "Cliente/Fornecedor", departamento: "Departamento" };
   try {
     const j = await api("/api/agrupado", { por });
     const grupos = j.grupos || [];

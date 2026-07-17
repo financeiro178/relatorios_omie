@@ -78,6 +78,26 @@ CREATE TABLE IF NOT EXISTS categoria (
     PRIMARY KEY (empresa_id, codigo)
 );
 
+CREATE TABLE IF NOT EXISTS departamento (
+    empresa_id TEXT,
+    codigo     TEXT,
+    descricao  TEXT,
+    estrutura  TEXT,
+    inativo    TEXT,
+    PRIMARY KEY (empresa_id, codigo)
+);
+
+CREATE TABLE IF NOT EXISTS titulo_departamento (
+    empresa_id TEXT,      -- credencial OMIE (namespace do titulo)
+    tipo       TEXT,      -- 'pagar' | 'receber'
+    codigo     {INT},     -- codigo_lancamento_omie do titulo
+    cod_dep    TEXT,
+    valor      {REAL},    -- valor rateado para o departamento
+    percentual {REAL},
+    PRIMARY KEY (empresa_id, tipo, codigo, cod_dep)
+);
+CREATE INDEX IF NOT EXISTS idx_rateio_dep ON titulo_departamento(empresa_id, cod_dep);
+
 CREATE TABLE IF NOT EXISTS titulo (
     empresa_id       TEXT,
     empresa_real     TEXT,
@@ -407,6 +427,15 @@ class DB:
             t.exec("UPDATE titulo SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
             t.exec("UPDATE orcamento SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
 
+    def substituir_rateio(self, empresa_id, tipo, linhas):
+        """Full refresh do rateio por departamento dos titulos de uma empresa/tipo."""
+        with self._tx() as t:
+            t.exec("DELETE FROM titulo_departamento WHERE empresa_id = ? AND tipo = ?", (empresa_id, tipo))
+            if linhas:
+                t.exec_many(
+                    """INSERT INTO titulo_departamento (empresa_id, tipo, codigo, cod_dep, valor, percentual)
+                       VALUES (:empresa_id, :tipo, :codigo, :cod_dep, :valor, :percentual)""", linhas)
+
     def substituir_orcamento(self, empresa_id, ano, linhas):
         """Full refresh do orcamento de caixa de uma empresa num ano."""
         with self._tx() as t:
@@ -593,11 +622,14 @@ class DB:
         }
 
     def agrupar(self, f, por):
-        """Agrupa os titulos filtrados por: categoria | conta | cliente | mes | empresa | status.
+        """Agrupa os titulos filtrados por: categoria | conta | cliente | mes | empresa |
+        status | departamento.
 
         O rotulo usa MIN(...) para o SELECT ser valido no GROUP BY estrito do
         Postgres (o SQLite aceitava coluna nao agregada e escolhia uma qualquer).
         """
+        if por == "departamento":
+            return self._agrupar_departamento(f)
         where, params = _where(f)
         campo_mes = CAMPO_DATA.get(f.get("campo_data"), "t.data_vencimento")
         mapa = {
@@ -618,6 +650,31 @@ class DB:
             GROUP BY {chave}
             ORDER BY (COALESCE(SUM(t.valor),0)) DESC
         """.format(chave=chave_sql, label=label_sql, joins=_JOINS, where=where)
+        linhas = self._query(sql, params)
+        res = []
+        for r in linhas:
+            d = dict(r)
+            d["saldo"] = (d["soma_receber"] or 0) - (d["soma_pagar"] or 0)
+            res.append(d)
+        return res
+
+    def _agrupar_departamento(self, f):
+        """Agrupa pelo rateio de departamentos: cada titulo pode dividir-se em N fatias
+        (titulo_departamento); titulo sem rateio entra inteiro em '(sem departamento)'."""
+        where, params = _where(f)
+        sql = """
+            SELECT COALESCE(td.cod_dep, '(sem departamento)') AS chave,
+                   MIN(COALESCE(NULLIF(dep.descricao,''), td.cod_dep, '(sem departamento)')) AS label,
+                   COUNT(DISTINCT t.codigo) AS n,
+                   COALESCE(SUM(CASE WHEN t.tipo='pagar'   THEN COALESCE(td.valor, t.valor) END),0) AS soma_pagar,
+                   COALESCE(SUM(CASE WHEN t.tipo='receber' THEN COALESCE(td.valor, t.valor) END),0) AS soma_receber
+            {joins}
+            LEFT JOIN titulo_departamento td ON td.empresa_id = t.empresa_id AND td.tipo = t.tipo AND td.codigo = t.codigo
+            LEFT JOIN departamento dep       ON dep.empresa_id = t.empresa_id AND dep.codigo = td.cod_dep
+            {where}
+            GROUP BY chave
+            ORDER BY (COALESCE(SUM(COALESCE(td.valor, t.valor)),0)) DESC
+        """.format(joins=_JOINS, where=where)
         linhas = self._query(sql, params)
         res = []
         for r in linhas:
