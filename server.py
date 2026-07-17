@@ -398,6 +398,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._enviar_json(self._dashboard(self._filtros(qs)))
         if caminho == "/api/dre":
             return self._enviar_json(db.dre(self._filtros(qs)))
+        if caminho == "/api/orcado":
+            try:
+                ano = int(qs.get("ano", [""])[0] or datetime.now().year)
+            except ValueError:
+                ano = datetime.now().year
+            return self._enviar_json(db.previsto_realizado(empresas_relatorio(self.user), ano))
         if caminho == "/api/export.csv":
             return self._exportar_csv(self._filtros(qs))
         if caminho == "/api/admin/dados":

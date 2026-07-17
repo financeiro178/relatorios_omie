@@ -22,6 +22,7 @@ const ICONS = {
   clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
   shield: P('<path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/>'),
   logout: P('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>'),
+  alvo: P('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.5"/>'),
 };
 const ic = (n) => ICONS[n] || "";
 
@@ -86,6 +87,7 @@ function posTip(x, y) {
 const VIEWS = [
   { id: "dashboard", nome: "Visão Geral", ico: "grid" },
   { id: "dre", nome: "DRE", ico: "saldo" },
+  { id: "orcado", nome: "Previsto × Realizado", ico: "alvo" },
   { id: "fluxo", nome: "Fluxo de Caixa", ico: "flow" },
   { id: "categoria", nome: "Categorias", ico: "tag" },
   { id: "conta", nome: "Contas", ico: "bank" },
@@ -202,6 +204,10 @@ function aplicarContexto() {
     $("#pageContext").innerHTML = "Gerencie usuários, contas OMIE e permissões de acesso";
     return;
   }
+  if (state.view === "orcado") {
+    $("#pageContext").innerHTML = "Orçamento de caixa do OMIE × realizado da análise (por vencimento) · todas as contas OMIE";
+    return;
+  }
   const c = contexto();
   $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Conta: ${esc(c.contas)} &nbsp;·&nbsp; ${esc(c.periodo)}`;
 }
@@ -237,12 +243,14 @@ function render() {
   const v = state.view;
   $$("#nav button").forEach((b) => b.classList.toggle("ativa", b.dataset.view === v));
   const ehAdmin = v === "admin";
-  document.querySelector(".toolbar").style.display = ehAdmin ? "none" : "";
-  $("#empresasSel").style.display = ehAdmin ? "none" : "";
-  $("#btnExportar").style.display = ehAdmin ? "none" : "";
+  const semToolbar = ehAdmin || v === "orcado";   // orcado tem escopo próprio (ano/mês)
+  document.querySelector(".toolbar").style.display = semToolbar ? "none" : "";
+  $("#empresasSel").style.display = semToolbar ? "none" : "";
+  $("#btnExportar").style.display = semToolbar ? "none" : "";
   $("#btnImprimir").style.display = ehAdmin ? "none" : "";
   aplicarContexto();
   if (ehAdmin) { $("#chipsAtivos").innerHTML = ""; return renderAdmin(); }
+  if (v === "orcado") { $("#chipsAtivos").innerHTML = ""; return renderOrcado(); }
   desenharChipsAtivos();
   if (v === "dashboard") return renderDashboard();
   if (v === "dre") return renderDre();
@@ -538,6 +546,89 @@ async function renderDre() {
         ${totalRow("Total de Despesas", d.total_despesas, "neg")}
         ${resRow}
       </tbody></table></div>`;
+  } catch (e) { erro(e); }
+}
+
+// ===================================================== PREVISTO × REALIZADO (orçamento)
+const MESES_NOMES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+function somaPeriodo(arr, mes) {   // mes: 0 = ano todo, 1..12 = um mês
+  if (!mes) return arr.reduce((s, v) => s + v, 0);
+  return arr[mes - 1] || 0;
+}
+async function renderOrcado() {
+  $(REL_ALVO).innerHTML = skeleton("dash");
+  try {
+    if (!state.orcAno) state.orcAno = new Date().getFullYear();
+    if (state.orcMes == null) state.orcMes = 0;
+    const j = await api("/api/orcado", { ano: state.orcAno });
+    const anoAtual = new Date().getFullYear();
+    const anos = [...new Set([...(j.anos || []), anoAtual - 1, anoAtual])].sort();
+    const mes = state.orcMes;
+    const rotPeriodo = mes ? `${MESES_NOMES[mes - 1]}/${state.orcAno}` : `Ano de ${state.orcAno}`;
+
+    const controles = `<div class="apagar-head" style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+      <div class="segmented">${anos.map((a) => `<button data-oano="${a}" class="${a === state.orcAno ? "ativa" : ""}">${a}</button>`).join("")}</div>
+      <div class="segmented">${["Ano"].concat(MESES_NOMES).map((n, i) => `<button data-omes="${i}" class="${i === mes ? "ativa" : ""}">${n}</button>`).join("")}</div>
+    </div>`;
+
+    const secoes = [["Receitas", j.receitas || [], true], ["Despesas", j.despesas || [], false]];
+    const tot = {};
+    for (const [nome, itens] of secoes.map((s) => [s[0], s[1]])) {
+      tot[nome] = {
+        p: itens.reduce((s, i) => s + somaPeriodo(i.previsto, mes), 0),
+        r: itens.reduce((s, i) => s + somaPeriodo(i.realizado, mes), 0),
+      };
+    }
+    const pct = (r, p) => p > 0 ? (r / p * 100) : null;
+    const pctTxt = (r, p) => { const x = pct(r, p); return x == null ? "—" : x.toFixed(0) + "%"; };
+
+    const kpis = `<div class="grid cols-3" style="margin-bottom:16px">
+      <div class="kpi"><div class="topo"><span class="rotulo">Receitas — Previsto</span><span class="ic verde">${ic("receber")}</span></div>
+        <div class="valor pos">${moedaCurta(tot.Receitas.p)}</div>
+        <div class="nota">Realizado <b class="pos">${moedaCurta(tot.Receitas.r)}</b> · atingido <b>${pctTxt(tot.Receitas.r, tot.Receitas.p)}</b></div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Despesas — Previsto</span><span class="ic vermelho">${ic("pagar")}</span></div>
+        <div class="valor neg">${moedaCurta(tot.Despesas.p)}</div>
+        <div class="nota">Realizado <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · consumido <b>${pctTxt(tot.Despesas.r, tot.Despesas.p)}</b></div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Resultado (${esc(rotPeriodo)})</span><span class="ic">${ic("saldo")}</span></div>
+        <div class="valor ${classeValor(tot.Receitas.p - tot.Despesas.p)}">${moedaCurta(tot.Receitas.p - tot.Despesas.p)}</div>
+        <div class="nota">Realizado <b class="${classeValor(tot.Receitas.r - tot.Despesas.r)}">${moedaCurta(tot.Receitas.r - tot.Despesas.r)}</b></div></div>
+    </div>`;
+
+    const tabela = (nome, itens, ehReceita) => {
+      const linhas = itens.map((i) => ({ cat: i.categoria, p: somaPeriodo(i.previsto, mes), r: somaPeriodo(i.realizado, mes) }))
+        .filter((l) => l.p || l.r);
+      if (!linhas.length) return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3></div>
+        <div class="panel-body">${vazioBloco("Sem orçamento nem lançamentos em " + rotPeriodo + ".")}</div></div>`;
+      const corpo = linhas.map((l) => {
+        const delta = l.r - l.p;
+        const favoravel = ehReceita ? l.r >= l.p : l.r <= l.p;
+        const x = pct(l.r, l.p);
+        const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill ${favoravel ? "r" : "p"}" style="width:${x == null ? (l.r ? 100 : 0) : Math.min(100, x).toFixed(0)}%"></div></div>`;
+        return `<tr>
+          <td class="forte">${esc(l.cat)}</td>
+          <td class="num dinheiro">${moeda(l.p)}</td>
+          <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
+          <td class="num dinheiro ${favoravel ? "pos" : "neg"}">${(delta >= 0 ? "+" : "") + moedaCurta(delta)}</td>
+          <td class="num">${x == null ? "—" : x.toFixed(0) + "%"}</td>
+          <td>${barra}</td></tr>`;
+      }).join("");
+      const t = { p: linhas.reduce((s, l) => s + l.p, 0), r: linhas.reduce((s, l) => s + l.r, 0) };
+      return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3><span class="sub">${rotPeriodo} · ${linhas.length} categoria(s)</span></div>
+        <div class="panel-body"><div class="tabela-wrap"><table>
+          <thead><tr><th>Categoria</th><th class="num">Previsto</th><th class="num">Realizado</th><th class="num">Δ</th><th class="num">%</th><th style="width:110px">Progresso</th></tr></thead>
+          <tbody>${corpo}</tbody>
+          <tfoot><tr><td>TOTAL</td><td class="num">${moeda(t.p)}</td><td class="num ${ehReceita ? "pos" : "neg"}">${moeda(t.r)}</td>
+            <td class="num">${moedaCurta(t.r - t.p)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td></tr></tfoot>
+        </table></div></div></div>`;
+    };
+
+    const temAlgo = (j.receitas || []).length || (j.despesas || []).length;
+    const aviso = temAlgo ? "" : `<div class="panel"><div class="panel-body">${vazioBloco(
+      "Nenhum orçamento encontrado para " + state.orcAno + ". Cadastre o Orçamento de Caixa no OMIE (Finanças → Orçamento) e clique em Sincronizar.")}</div></div>`;
+
+    $(REL_ALVO).innerHTML = controles + kpis + tabela("Receitas", j.receitas || [], true) + tabela("Despesas", j.despesas || [], false) + aviso;
+    $$("[data-oano]").forEach((b) => b.addEventListener("click", () => { state.orcAno = +b.dataset.oano; renderOrcado(); }));
+    $$("[data-omes]").forEach((b) => b.addEventListener("click", () => { state.orcMes = +b.dataset.omes; renderOrcado(); }));
   } catch (e) { erro(e); }
 }
 

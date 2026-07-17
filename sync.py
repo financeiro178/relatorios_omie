@@ -139,6 +139,35 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
     resumo["contas_a_receber"] = len(linhas)
     passo("%d contas a receber." % len(linhas))
 
+    # 7) Orcamento de caixa (previsto x realizado do OMIE) — ano anterior e atual
+    passo("Buscando orcamento de caixa...")
+    ano_atual = datetime.now().year
+    total_orc = 0
+    for ano in (ano_atual - 1, ano_atual):
+        linhas_orc = []
+        for mes in range(1, 13):
+            try:
+                r = cli.chamar("financas/caixa/", "ListarOrcamentos", {"nAno": ano, "nMes": mes})
+            except OmieError:
+                continue   # mes sem orcamento (ou modulo nao habilitado) — segue
+            for o in (r.get("ListaOrcamentos") or []):
+                if not o.get("cCodCateg"):
+                    continue
+                realizado = o.get("nValorRealilzado")   # typo oficial da API
+                if realizado is None:
+                    realizado = o.get("nValorRealizado")
+                linhas_orc.append({
+                    "empresa_id": empresa_id, "ano": ano, "mes": mes,
+                    "cod_categoria": o.get("cCodCateg"),
+                    "descricao": o.get("cDesCateg") or "",
+                    "valor_previsto": num(o.get("nValorPrevisto")),
+                    "valor_realizado_omie": num(realizado),
+                })
+        db.substituir_orcamento(empresa_id, ano, linhas_orc)
+        total_orc += len(linhas_orc)
+    resumo["orcamentos"] = total_orc
+    passo("%d linhas de orcamento." % total_orc)
+
     db.registrar_sync(empresa_id, _agora(), resumo)
     return resumo
 

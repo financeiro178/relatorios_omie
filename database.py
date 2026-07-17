@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS sync_info (
     resumo      TEXT
 );
 
+CREATE TABLE IF NOT EXISTS orcamento (
+    empresa_id           TEXT,
+    ano                  {INT},
+    mes                  {INT},
+    cod_categoria        TEXT,
+    descricao            TEXT,
+    valor_previsto       {REAL},
+    valor_realizado_omie {REAL},
+    PRIMARY KEY (empresa_id, ano, mes, cod_categoria)
+);
+
 CREATE TABLE IF NOT EXISTS usuario (
     id            {AUTOPK},
     nome          TEXT,
@@ -264,9 +275,14 @@ class DB:
         self._criar_schema()
 
     def fechar(self):
-        """Encerra o pool (Postgres). No SQLite nao e necessario."""
-        if self.pg:
-            self._pool.close()
+        """Encerra o backend (fecha o pool no Postgres / a conexao no SQLite)."""
+        try:
+            if self.pg:
+                self._pool.close()
+            elif self.con is not None:
+                self.con.close()
+        except Exception:  # noqa: BLE001 - shutdown nunca deve falhar
+            pass
 
     def _criar_schema(self):
         if self.pg:
@@ -367,6 +383,86 @@ class DB:
                 t.exec("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND (empresa_real IS NULL OR empresa_real='')",
                        (cred, cred))
             t.exec("UPDATE titulo SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
+
+    def substituir_orcamento(self, empresa_id, ano, linhas):
+        """Full refresh do orcamento de caixa de uma empresa num ano."""
+        with self._tx() as t:
+            t.exec("DELETE FROM orcamento WHERE empresa_id = ? AND ano = ?", (empresa_id, ano))
+            if linhas:
+                t.exec_many(
+                    """INSERT INTO orcamento (empresa_id, ano, mes, cod_categoria, descricao,
+                                              valor_previsto, valor_realizado_omie)
+                       VALUES (:empresa_id, :ano, :mes, :cod_categoria, :descricao,
+                               :valor_previsto, :valor_realizado_omie)""", linhas)
+
+    def previsto_realizado(self, empresas, ano):
+        """Orcamento de caixa do OMIE (previsto) x realizado da analise, por categoria e mes.
+
+        Ambos os lados usam o namespace da credencial (empresa_id) e agrupam pelo
+        ROTULO da categoria — igual a DRE; o realizado soma os titulos pela data de
+        vencimento dentro do ano.
+        """
+        ph, params = _in("o.empresa_id", empresas)
+        cond = ("AND " + ph) if ph else ""
+        prev = self._query(
+            """SELECT COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria) AS categoria,
+                      o.mes AS mes, MIN(COALESCE(cat.natureza,'')) AS natureza,
+                      SUM(o.valor_previsto) AS previsto, SUM(o.valor_realizado_omie) AS realizado_omie
+               FROM orcamento o
+               LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
+               WHERE o.ano = ? %s
+               GROUP BY categoria, mes""" % cond, [ano] + params)
+        ph2, params2 = _in("t.empresa_id", empresas)
+        cond2 = ("AND " + ph2) if ph2 else ""
+        real = self._query(
+            """SELECT COALESCE(NULLIF(cat.descricao,''), t.cod_categoria, '(sem categoria)') AS categoria,
+                      t.tipo AS tipo, substr(t.data_vencimento,6,2) AS mes,
+                      MIN(COALESCE(cat.natureza,'')) AS natureza, SUM(t.valor) AS soma
+               FROM titulo t
+               LEFT JOIN categoria cat ON cat.empresa_id = t.empresa_id AND cat.codigo = t.cod_categoria
+               WHERE substr(t.data_vencimento,1,4) = ? %s
+               GROUP BY categoria, tipo, mes""" % cond2, [str(ano)] + params2)
+
+        linhas = {}
+
+        def linha(cat):
+            if cat not in linhas:
+                linhas[cat] = {"categoria": cat, "previsto": [0.0] * 12, "realizado": [0.0] * 12,
+                                "realizado_omie": [0.0] * 12, "natureza": "", "receber": 0.0, "pagar": 0.0}
+            return linhas[cat]
+
+        for r in prev:
+            m = int(r["mes"])
+            if 1 <= m <= 12:
+                l = linha(r["categoria"])
+                l["previsto"][m - 1] += r["previsto"] or 0
+                l["realizado_omie"][m - 1] += r["realizado_omie"] or 0
+                l["natureza"] = l["natureza"] or (r["natureza"] or "")
+        for r in real:
+            try:
+                m = int(r["mes"])
+            except (TypeError, ValueError):
+                continue
+            if 1 <= m <= 12:
+                l = linha(r["categoria"])
+                l["realizado"][m - 1] += r["soma"] or 0
+                l["natureza"] = l["natureza"] or (r["natureza"] or "")
+                l[r["tipo"] if r["tipo"] in ("receber", "pagar") else "pagar"] += r["soma"] or 0
+
+        receitas, despesas = [], []
+        for l in linhas.values():
+            if not any(l["previsto"]) and not any(l["realizado"]):
+                continue
+            eh_receita = (l["receber"] > l["pagar"]) if (l["receber"] or l["pagar"]) \
+                else str(l["natureza"]).upper().startswith("R")
+            item = {"categoria": l["categoria"], "previsto": [round(v, 2) for v in l["previsto"]],
+                    "realizado": [round(v, 2) for v in l["realizado"]]}
+            (receitas if eh_receita else despesas).append(item)
+        chave = lambda i: -max(sum(i["previsto"]), sum(i["realizado"]))  # noqa: E731
+        receitas.sort(key=chave)
+        despesas.sort(key=chave)
+        anos = [r["ano"] for r in self._query("SELECT DISTINCT ano AS ano FROM orcamento ORDER BY ano")]
+        return {"ano": ano, "anos": anos, "receitas": receitas, "despesas": despesas}
 
     # ---------------- leitura ----------------
     def tem_titulos(self):
