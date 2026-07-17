@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import holding
-from omie_client import OmieClient, OmieError, SemRegistros
+from omie_client import OmieClient, OmieError
 from util import num, para_iso
 
 
@@ -169,42 +169,10 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
     resumo["contas_a_receber"] = len(linhas)
     passo("%d contas a receber." % len(linhas))
 
-    # 7) Orcamento de caixa (previsto x realizado do OMIE) — ano anterior e atual
-    passo("Buscando orcamento de caixa...")
-    ano_atual = datetime.now().year
-    total_orc = 0
-    for ano in (ano_atual - 1, ano_atual):
-        linhas_orc = []
-        falhou = False
-        for mes in range(1, 13):
-            try:
-                r = cli.chamar("financas/caixa/", "ListarOrcamentos", {"nAno": ano, "nMes": mes})
-            except SemRegistros:
-                continue   # mes sem orcamento cadastrado — segue
-            except OmieError:
-                falhou = True   # falha real da API: NAO apagar o orcamento ja sincronizado
-                break
-            for o in (r.get("ListaOrcamentos") or []):
-                if not o.get("cCodCateg"):
-                    continue
-                realizado = o.get("nValorRealilzado")   # typo oficial da API
-                if realizado is None:
-                    realizado = o.get("nValorRealizado")
-                desc = o.get("cDesCateg") or ""
-                linhas_orc.append({
-                    "empresa_id": empresa_id,
-                    "empresa_real": holding.empresa_real(empresa_id, desc),
-                    "ano": ano, "mes": mes,
-                    "cod_categoria": o.get("cCodCateg"),
-                    "descricao": desc,
-                    "valor_previsto": num(o.get("nValorPrevisto")),
-                    "valor_realizado_omie": num(realizado),
-                })
-        if not falhou:
-            db.substituir_orcamento(empresa_id, ano, linhas_orc)
-            total_orc += len(linhas_orc)
-    resumo["orcamentos"] = total_orc
-    passo("%d linhas de orcamento." % total_orc)
+    # Obs.: a tela "Previsto x Realizado" e calculada direto dos titulos (previsto =
+    # titulos por vencimento; realizado = liquidados), no criterio do Fluxo de Caixa do
+    # OMIE. O modulo "Orcamento de Caixa" (ListarOrcamentos) foi descartado porque a API
+    # retorna previsto=0 para estas empresas (o orcamento nao e mantido naquele modulo).
 
     db.registrar_sync(empresa_id, _agora(), resumo)
     return resumo

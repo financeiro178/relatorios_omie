@@ -448,86 +448,68 @@ class DB:
                                :valor_previsto, :valor_realizado_omie)""", linhas)
 
     def previsto_realizado(self, empresas, ano):
-        """Orcamento de caixa do OMIE (previsto) x realizado da analise, por categoria e mes.
+        """Previsto x Realizado no criterio do Fluxo de Caixa do OMIE, direto dos titulos:
 
-        Ambos os lados filtram por empresa_real (holding ROI dividida — orcamento pelo
-        prefixo [Empresa] da categoria, titulos pela conta) e agrupam pelo ROTULO da
-        categoria — igual a DRE; o realizado soma os titulos pela data de vencimento
-        dentro do ano.
+        - **Previsto**  = TODOS os titulos com vencimento no mes (o esperado no periodo);
+        - **Realizado** = os que ja foram liquidados (PAGO/RECEBIDO/LIQUIDADO/BAIXADO/CONCILIADO).
+
+        Cancelados sao ignorados. Filtra por empresa_real (holding ROI dividida) e agrupa
+        pelo rotulo da categoria; classifica receita/despesa pelo tipo do titulo.
         """
-        ph, params = _in("o.empresa_real", empresas)
+        ph, params = _in("t.empresa_real", empresas)
         cond = ("AND " + ph) if ph else ""
-        prev = self._query(
-            """SELECT COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria) AS categoria,
-                      o.mes AS mes, MIN(COALESCE(cat.natureza,'')) AS natureza,
-                      MIN(o.cod_categoria) AS cod,
-                      SUM(o.valor_previsto) AS previsto, SUM(o.valor_realizado_omie) AS realizado_omie
-               FROM orcamento o
-               LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
-               WHERE o.ano = ? %s
-               GROUP BY categoria, mes""" % cond, [ano] + params)
-        ph2, params2 = _in("t.empresa_real", empresas)
-        cond2 = ("AND " + ph2) if ph2 else ""
-        real = self._query(
+        rows = self._query(
             """SELECT COALESCE(NULLIF(cat.descricao,''), t.cod_categoria, '(sem categoria)') AS categoria,
                       t.tipo AS tipo, substr(t.data_vencimento,6,2) AS mes,
-                      MIN(COALESCE(cat.natureza,'')) AS natureza,
-                      MIN(COALESCE(t.cod_categoria,'')) AS cod, SUM(t.valor) AS soma
+                      CASE WHEN UPPER(COALESCE(t.status,'')) IN
+                                ('PAGO','RECEBIDO','LIQUIDADO','BAIXADO','CONCILIADO')
+                           THEN 1 ELSE 0 END AS liquidado,
+                      SUM(t.valor) AS soma
                FROM titulo t
                LEFT JOIN categoria cat ON cat.empresa_id = t.empresa_id AND cat.codigo = t.cod_categoria
-               WHERE substr(t.data_vencimento,1,4) = ? %s
-               GROUP BY categoria, tipo, mes""" % cond2, [str(ano)] + params2)
+               WHERE substr(t.data_vencimento,1,4) = ?
+                 AND UPPER(COALESCE(t.status,'')) NOT LIKE ?
+                 %s
+               GROUP BY categoria, tipo, mes, liquidado""" % cond,
+            [str(ano), "%CANCEL%"] + params)
 
         linhas = {}
 
         def linha(cat):
             if cat not in linhas:
                 linhas[cat] = {"categoria": cat, "previsto": [0.0] * 12, "realizado": [0.0] * 12,
-                                "realizado_omie": [0.0] * 12, "natureza": "", "cod": "",
                                 "receber": 0.0, "pagar": 0.0}
             return linhas[cat]
 
-        for r in prev:
-            m = int(r["mes"])
-            if 1 <= m <= 12:
-                l = linha(r["categoria"])
-                l["previsto"][m - 1] += r["previsto"] or 0
-                l["realizado_omie"][m - 1] += r["realizado_omie"] or 0
-                l["natureza"] = l["natureza"] or (r["natureza"] or "")
-                l["cod"] = l["cod"] or (r["cod"] or "")
-        for r in real:
+        for r in rows:
             try:
                 m = int(r["mes"])
             except (TypeError, ValueError):
                 continue
-            if 1 <= m <= 12:
-                l = linha(r["categoria"])
-                l["realizado"][m - 1] += r["soma"] or 0
-                l["natureza"] = l["natureza"] or (r["natureza"] or "")
-                l["cod"] = l["cod"] or (r["cod"] or "")
-                l[r["tipo"] if r["tipo"] in ("receber", "pagar") else "pagar"] += r["soma"] or 0
+            if not (1 <= m <= 12):
+                continue
+            l = linha(r["categoria"])
+            soma = r["soma"] or 0
+            l["previsto"][m - 1] += soma                 # previsto = tudo que vence no mes
+            if r["liquidado"]:
+                l["realizado"][m - 1] += soma            # realizado = o subconjunto liquidado
+            l[r["tipo"] if r["tipo"] in ("receber", "pagar") else "pagar"] += soma
 
         receitas, despesas = [], []
         for l in linhas.values():
             if not any(l["previsto"]) and not any(l["realizado"]):
                 continue
-            # classificacao: 1) tipo dos titulos realizados; 2) natureza R/D da categoria
-            # (sync grava a partir dos flags conta_receita/conta_despesa do OMIE);
-            # 3) prefixo do plano de contas OMIE ("1.*" = receitas, "2.*" = despesas)
-            nat = str(l["natureza"]).upper()
-            if l["receber"] or l["pagar"]:
-                eh_receita = l["receber"] > l["pagar"]
-            elif nat in ("R", "D"):
-                eh_receita = nat == "R"
-            else:
-                eh_receita = str(l["cod"]).startswith("1")
+            eh_receita = l["receber"] >= l["pagar"]      # todo titulo tem tipo definido
             item = {"categoria": l["categoria"], "previsto": [round(v, 2) for v in l["previsto"]],
                     "realizado": [round(v, 2) for v in l["realizado"]]}
             (receitas if eh_receita else despesas).append(item)
         chave = lambda i: -max(sum(i["previsto"]), sum(i["realizado"]))  # noqa: E731
         receitas.sort(key=chave)
         despesas.sort(key=chave)
-        anos = [r["ano"] for r in self._query("SELECT DISTINCT ano AS ano FROM orcamento ORDER BY ano")]
+        anos = [int(r["ano"]) for r in self._query(
+            """SELECT DISTINCT substr(t.data_vencimento,1,4) AS ano FROM titulo t
+               WHERE t.data_vencimento IS NOT NULL AND t.data_vencimento <> '' %s
+               ORDER BY ano""" % cond, params) if r["ano"]]
         return {"ano": ano, "anos": anos, "receitas": receitas, "despesas": despesas}
 
     # ---------------- leitura ----------------

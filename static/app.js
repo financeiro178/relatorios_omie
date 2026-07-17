@@ -208,7 +208,7 @@ function aplicarContexto() {
   }
   if (state.view === "orcado") {
     const c = contexto();
-    $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Orçamento de caixa do OMIE × realizado da análise (por vencimento)`;
+    $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Previsto = títulos por vencimento &nbsp;·&nbsp; Realizado = pago/recebido`;
     return;
   }
   const c = contexto();
@@ -588,11 +588,11 @@ async function renderOrcado() {
     const kpis = `<div class="grid cols-3" style="margin-bottom:16px">
       <div class="kpi"><div class="topo"><span class="rotulo">Receitas — Previsto</span><span class="ic verde">${ic("receber")}</span></div>
         <div class="valor pos">${moedaCurta(tot.Receitas.p)}</div>
-        <div class="nota">Realizado <b class="pos">${moedaCurta(tot.Receitas.r)}</b> · atingido <b>${pctTxt(tot.Receitas.r, tot.Receitas.p)}</b></div></div>
+        <div class="nota">Recebido <b class="pos">${moedaCurta(tot.Receitas.r)}</b> · <b>${pctTxt(tot.Receitas.r, tot.Receitas.p)}</b> do previsto</div></div>
       <div class="kpi"><div class="topo"><span class="rotulo">Despesas — Previsto</span><span class="ic vermelho">${ic("pagar")}</span></div>
         <div class="valor neg">${moedaCurta(tot.Despesas.p)}</div>
-        <div class="nota">Realizado <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · consumido <b>${pctTxt(tot.Despesas.r, tot.Despesas.p)}</b></div></div>
-      <div class="kpi"><div class="topo"><span class="rotulo">Resultado (${esc(rotPeriodo)})</span><span class="ic">${ic("saldo")}</span></div>
+        <div class="nota">Pago <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · <b>${pctTxt(tot.Despesas.r, tot.Despesas.p)}</b> do previsto</div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Resultado previsto (${esc(rotPeriodo)})</span><span class="ic">${ic("saldo")}</span></div>
         <div class="valor ${classeValor(tot.Receitas.p - tot.Despesas.p)}">${moedaCurta(tot.Receitas.p - tot.Despesas.p)}</div>
         <div class="nota">Realizado <b class="${classeValor(tot.Receitas.r - tot.Despesas.r)}">${moedaCurta(tot.Receitas.r - tot.Despesas.r)}</b></div></div>
     </div>`;
@@ -601,33 +601,32 @@ async function renderOrcado() {
       const linhas = itens.map((i) => ({ cat: i.categoria, p: somaPeriodo(i.previsto, mes), r: somaPeriodo(i.realizado, mes) }))
         .filter((l) => l.p || l.r);
       if (!linhas.length) return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3></div>
-        <div class="panel-body">${vazioBloco("Sem orçamento nem lançamentos em " + rotPeriodo + ".")}</div></div>`;
+        <div class="panel-body">${vazioBloco("Sem lançamentos em " + rotPeriodo + ".")}</div></div>`;
       const corpo = linhas.map((l) => {
-        const delta = l.r - l.p;
-        const favoravel = ehReceita ? l.r >= l.p : l.r <= l.p;
+        const aberto = l.p - l.r;   // ainda não liquidado
         const x = pct(l.r, l.p);
-        const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill ${favoravel ? "r" : "p"}" style="width:${x == null ? (l.r ? 100 : 0) : Math.min(100, x).toFixed(0)}%"></div></div>`;
+        const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill r" style="width:${x == null ? 0 : Math.min(100, x).toFixed(0)}%"></div></div>`;
         return `<tr>
           <td class="forte">${esc(l.cat)}</td>
           <td class="num dinheiro">${moeda(l.p)}</td>
           <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
-          <td class="num dinheiro ${favoravel ? "pos" : "neg"}">${(delta >= 0 ? "+" : "") + moedaCurta(delta)}</td>
+          <td class="num dinheiro">${moeda(aberto)}</td>
           <td class="num">${x == null ? "—" : x.toFixed(0) + "%"}</td>
           <td>${barra}</td></tr>`;
       }).join("");
       const t = { p: linhas.reduce((s, l) => s + l.p, 0), r: linhas.reduce((s, l) => s + l.r, 0) };
       return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3><span class="sub">${rotPeriodo} · ${linhas.length} categoria(s)</span></div>
         <div class="panel-body"><div class="tabela-wrap"><table>
-          <thead><tr><th>Categoria</th><th class="num">Previsto</th><th class="num">Realizado</th><th class="num">Δ</th><th class="num">%</th><th style="width:110px">Progresso</th></tr></thead>
+          <thead><tr><th>Categoria</th><th class="num">Previsto</th><th class="num">Realizado</th><th class="num">Em aberto</th><th class="num">% liq.</th><th style="width:110px">Progresso</th></tr></thead>
           <tbody>${corpo}</tbody>
           <tfoot><tr><td>TOTAL</td><td class="num">${moeda(t.p)}</td><td class="num ${ehReceita ? "pos" : "neg"}">${moeda(t.r)}</td>
-            <td class="num">${moedaCurta(t.r - t.p)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td></tr></tfoot>
+            <td class="num">${moeda(t.p - t.r)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td></tr></tfoot>
         </table></div></div></div>`;
     };
 
     const temAlgo = (j.receitas || []).length || (j.despesas || []).length;
     const aviso = temAlgo ? "" : `<div class="panel"><div class="panel-body">${vazioBloco(
-      "Nenhum orçamento encontrado para " + state.orcAno + ". Cadastre o Orçamento de Caixa no OMIE (Finanças → Orçamento) e clique em Sincronizar.")}</div></div>`;
+      "Nenhum lançamento em " + state.orcAno + " para esta seleção. Ajuste o filtro de empresa/ano, ou clique em Sincronizar.")}</div></div>`;
 
     $(REL_ALVO).innerHTML = controles + kpis + tabela("Receitas", j.receitas || [], true) + tabela("Despesas", j.despesas || [], false) + aviso;
     $$("[data-oano]").forEach((b) => b.addEventListener("click", () => { state.orcAno = +b.dataset.oano; renderOrcado(); }));
