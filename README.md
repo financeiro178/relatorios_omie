@@ -42,6 +42,28 @@ O OMIE da ROI é consolidado: as contas correntes têm prefixo `[Empresa]` no no
 (ex.: `[Gibraltar] Bradesco`). O app divide os títulos por **empresa real** automaticamente
 (`holding.py`), então cada empresa aparece separada nos relatórios e filtros.
 
+## Banco de dados: SQLite local, Postgres na nuvem
+
+A camada de dados escolhe o backend sozinha:
+
+- **Sem `DATABASE_URL`** (rodando local): SQLite em `analise_omie.db`, como sempre — zero dependências.
+- **Com `DATABASE_URL`** (produção): PostgreSQL via psycopg 3 (pool de conexões). O Render
+  Postgres é um serviço gerenciado que **persiste independente do web service** — usuários,
+  empresas e dados sincronizados **não se perdem mais** em deploy/restart/hibernação.
+
+### Ativar a persistência definitiva no Render
+
+1. No Render: **New → Postgres** (mesmo workspace/região do web service). O plano Free serve
+   para começar (atenção: Postgres Free do Render expira em ~30 dias; o plano pago não).
+2. No web service `relatorios_omie`: **Environment → Add** `DATABASE_URL` = a **Internal
+   Database URL** do Postgres criado.
+3. Mantenha `ADMIN_SENHA` (recria o admin se o banco estiver vazio) e o `CONFIG_JSON`
+   (importa as credenciais OMIE se o banco estiver vazio) — a lógica de boot é idempotente:
+   com o Postgres já populado, nada é sobrescrito.
+4. **Manual Deploy** → o app sobe usando Postgres (o log de boot mostra
+   `Banco: Postgres (DATABASE_URL)`). Faça login e **Sincronizar** uma vez; a partir daí
+   tudo persiste, inclusive usuários e empresas criados na Administração.
+
 ## Deploy no Render (web service, plano Free)
 
 No Render: **New → Web Service** → conecte este repositório e preencha:

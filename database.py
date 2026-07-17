@@ -1,23 +1,45 @@
 # -*- coding: utf-8 -*-
-"""Camada de banco de dados do app Analise Financeira OMIE (SQLite, biblioteca padrao).
+"""Camada de banco de dados do app Analise Financeira OMIE.
 
-Guarda o que foi sincronizado do OMIE e responde as consultas dos relatorios.
-Todas as tabelas tem 'empresa_id' para suportar varias empresas ao mesmo tempo.
-Este app e independente do K Finserv Tesouraria: possui banco, usuarios e sessoes proprios.
+Dois backends, escolhidos automaticamente:
+- **PostgreSQL** quando a variavel de ambiente DATABASE_URL existe (producao no
+  Render: o Postgres gerenciado persiste independente do web service). Usa
+  psycopg 3 com pool de conexoes e linhas-dicionario.
+- **SQLite** caso contrario (desenvolvimento local) — biblioteca padrao, arquivo
+  local, exatamente como antes.
+
+O restante do codigo fala com os helpers `_query`/`_query_one`/`_tx` da classe DB;
+os SQLs sao escritos no dialeto comum (placeholders `?`/`:nome`, traduzidos para
+`%s`/`%(nome)s` no Postgres). Linhas sao acessiveis por nome de coluna nos dois
+backends (sqlite3.Row / psycopg dict_row).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 
 import holding
 
-SCHEMA = """
+try:  # so e necessario quando DATABASE_URL esta definida
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+except ImportError:  # pragma: no cover - ambiente local sem o pacote
+    psycopg = None
+
+# ---------------------------------------------------------------- schema
+# Template unico; tipos trocados por backend:
+#   {INT}    -> INTEGER (sqlite) | BIGINT (pg — codigos do OMIE passam de 2^31)
+#   {REAL}   -> REAL (sqlite) | DOUBLE PRECISION (pg)
+#   {AUTOPK} -> INTEGER PRIMARY KEY AUTOINCREMENT | BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+_SCHEMA_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS empresa (
     empresa_id    TEXT PRIMARY KEY,
-    nome          TEXT,            -- rotulo definido no config.json / seed
+    nome          TEXT,
     razao_social  TEXT,
     nome_fantasia TEXT,
     cnpj          TEXT,
@@ -28,20 +50,20 @@ CREATE TABLE IF NOT EXISTS empresa (
 
 CREATE TABLE IF NOT EXISTS conta_corrente (
     empresa_id    TEXT,
-    ncodcc        INTEGER,
+    ncodcc        {INT},
     descricao     TEXT,
     tipo          TEXT,
     codigo_banco  TEXT,
     agencia       TEXT,
     numero        TEXT,
     inativo       TEXT,
-    saldo_inicial REAL,
+    saldo_inicial {REAL},
     PRIMARY KEY (empresa_id, ncodcc)
 );
 
 CREATE TABLE IF NOT EXISTS cliente (
     empresa_id    TEXT,
-    codigo        INTEGER,
+    codigo        {INT},
     razao_social  TEXT,
     nome_fantasia TEXT,
     documento     TEXT,
@@ -57,21 +79,21 @@ CREATE TABLE IF NOT EXISTS categoria (
 );
 
 CREATE TABLE IF NOT EXISTS titulo (
-    empresa_id       TEXT,      -- credencial OMIE de origem
-    empresa_real     TEXT,      -- empresa real (holding ROI dividida por conta)
-    tipo             TEXT,      -- 'pagar' ou 'receber'
-    codigo           INTEGER,   -- codigo_lancamento_omie
-    cod_cliente      INTEGER,
-    ncodcc           INTEGER,
+    empresa_id       TEXT,
+    empresa_real     TEXT,
+    tipo             TEXT,
+    codigo           {INT},
+    cod_cliente      {INT},
+    ncodcc           {INT},
     cod_categoria    TEXT,
     numero_documento TEXT,
     numero_parcela   TEXT,
     tipo_documento   TEXT,
-    data_emissao     TEXT,      -- ISO aaaa-mm-dd
+    data_emissao     TEXT,
     data_vencimento  TEXT,
     data_previsao    TEXT,
     data_registro    TEXT,
-    valor            REAL,
+    valor            {REAL},
     status           TEXT,
     observacao       TEXT,
     PRIMARY KEY (empresa_id, tipo, codigo)
@@ -90,27 +112,27 @@ CREATE TABLE IF NOT EXISTS sync_info (
 );
 
 CREATE TABLE IF NOT EXISTS usuario (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            {AUTOPK},
     nome          TEXT,
     login         TEXT UNIQUE NOT NULL,
     senha_hash    TEXT NOT NULL,
     salt          TEXT NOT NULL,
-    iteracoes     INTEGER NOT NULL,
-    papel         TEXT NOT NULL DEFAULT 'user',   -- 'admin' | 'user'
-    ativo         INTEGER NOT NULL DEFAULT 1,
+    iteracoes     {INT} NOT NULL,
+    papel         TEXT NOT NULL DEFAULT 'user',
+    ativo         {INT} NOT NULL DEFAULT 1,
     criado_em     TEXT,
     ultimo_acesso TEXT
 );
 
 CREATE TABLE IF NOT EXISTS usuario_empresa (
-    usuario_id INTEGER NOT NULL,
+    usuario_id {INT} NOT NULL,
     empresa_id TEXT NOT NULL,
     PRIMARY KEY (usuario_id, empresa_id)
 );
 
 CREATE TABLE IF NOT EXISTS sessao (
     token_hash TEXT PRIMARY KEY,
-    usuario_id INTEGER NOT NULL,
+    usuario_id {INT} NOT NULL,
     criado_em  TEXT,
     expira_em  TEXT,
     ip         TEXT
@@ -130,6 +152,61 @@ CREATE TABLE IF NOT EXISTS app_config (
 );
 """
 
+
+def _schema_sql(pg):
+    if pg:
+        return _SCHEMA_TEMPLATE.format(
+            INT="BIGINT", REAL="DOUBLE PRECISION",
+            AUTOPK="BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY")
+    return _SCHEMA_TEMPLATE.format(
+        INT="INTEGER", REAL="REAL",
+        AUTOPK="INTEGER PRIMARY KEY AUTOINCREMENT")
+
+
+# ---------------------------------------------------------------- traducao de SQL
+_RE_NOMEADO = re.compile(r":([a-zA-Z_][a-zA-Z0-9_]*)")
+
+
+def _pg_sql(sql):
+    """Traduz placeholders do dialeto comum para o psycopg: ? -> %s, :nome -> %(nome)s.
+    (Nenhum SQL do app tem '?' ou ':' dentro de literais de string.)"""
+    sql = sql.replace("?", "%s")
+    return _RE_NOMEADO.sub(r"%(\1)s", sql)
+
+
+class _Exec:
+    """Executor dentro de uma transacao (ver DB._tx)."""
+
+    def __init__(self, con, pg):
+        self._con = con
+        self._pg = pg
+
+    def exec(self, sql, params=()):
+        if self._pg:
+            return self._con.execute(_pg_sql(sql), params)
+        return self._con.execute(sql, params)
+
+    def exec_many(self, sql, seq):
+        seq = list(seq)
+        if not seq:
+            return
+        if self._pg:
+            with self._con.cursor() as cur:
+                cur.executemany(_pg_sql(sql), seq)
+        else:
+            self._con.executemany(sql, seq)
+
+    def query_one(self, sql, params=()):
+        return self.exec(sql, params).fetchone()
+
+    def insert_id(self, sql, params=()):
+        """INSERT que devolve o id gerado (lastrowid no SQLite, RETURNING no Postgres)."""
+        if self._pg:
+            return self._con.execute(_pg_sql(sql) + " RETURNING id", params).fetchone()["id"]
+        return self._con.execute(sql, params).lastrowid
+
+
+# ---------------------------------------------------------------- filtros (WHERE)
 # Coluna SQL por campo de data escolhido no filtro (whitelist anti-injecao)
 CAMPO_DATA = {
     "vencimento": "t.data_vencimento",
@@ -164,20 +241,74 @@ LEFT JOIN categoria cat    ON cat.empresa_id = t.empresa_id AND cat.codigo = t.c
 
 
 class DB:
-    def __init__(self, caminho):
+    def __init__(self, caminho, database_url=None):
         self.caminho = caminho
-        self._lock = threading.Lock()
-        self.con = sqlite3.connect(caminho, check_same_thread=False)
-        self.con.row_factory = sqlite3.Row
-        self.con.execute("PRAGMA journal_mode=WAL")
-        self.con.execute("PRAGMA synchronous=NORMAL")
-        self.con.executescript(SCHEMA)
-        self.con.commit()
+        self.database_url = database_url or None
+        self.pg = bool(self.database_url)
+        self._lock = threading.Lock()   # serializa escritas no caminho SQLite
+        if self.pg:
+            if psycopg is None:
+                raise RuntimeError(
+                    "DATABASE_URL definida mas o psycopg nao esta instalado. "
+                    "Rode: pip install 'psycopg[binary,pool]'")
+            self._pool = ConnectionPool(
+                self.database_url, open=True, min_size=1,
+                max_size=int(os.environ.get("PG_POOL_MAX", "10")),
+                kwargs={"row_factory": dict_row})
+            self.con = None
+        else:
+            self.con = sqlite3.connect(caminho, check_same_thread=False)
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA journal_mode=WAL")       # PRAGMAs so existem no SQLite
+            self.con.execute("PRAGMA synchronous=NORMAL")
+        self._criar_schema()
 
-    # ---------- escrita (sincronizacao) ----------
+    def fechar(self):
+        """Encerra o pool (Postgres). No SQLite nao e necessario."""
+        if self.pg:
+            self._pool.close()
+
+    def _criar_schema(self):
+        if self.pg:
+            with self._pool.connection() as con:
+                con.execute(_schema_sql(True))
+        else:
+            self.con.executescript(_schema_sql(False))
+            self.con.commit()
+
+    # ---------------- helpers de acesso (unico ponto que fala com o banco) ----------------
+    @contextmanager
+    def _tx(self):
+        """Transacao de escrita: tudo dentro do bloco e atomico e commitado ao sair."""
+        if self.pg:
+            with self._pool.connection() as con:   # commit/rollback automaticos
+                yield _Exec(con, True)
+        else:
+            with self._lock:
+                try:
+                    yield _Exec(self.con, False)
+                    self.con.commit()
+                except Exception:
+                    self.con.rollback()
+                    raise
+
+    def _query(self, sql, params=()):
+        """SELECT -> lista de linhas acessiveis por nome de coluna."""
+        if self.pg:
+            with self._pool.connection() as con:
+                return con.execute(_pg_sql(sql), params).fetchall()
+        return self.con.execute(sql, params).fetchall()
+
+    def _query_one(self, sql, params=()):
+        if self.pg:
+            with self._pool.connection() as con:
+                return con.execute(_pg_sql(sql), params).fetchone()
+        return self.con.execute(sql, params).fetchone()
+
+    # ---------------- escrita (sincronizacao) ----------------
     def upsert_empresa(self, empresa_id, dados):
-        with self._lock:
-            self.con.execute(
+        with self._tx() as t:
+            t.exec(
                 """INSERT INTO empresa (empresa_id, nome, razao_social, nome_fantasia, cnpj, cidade, estado, atualizado_em)
                    VALUES (:empresa_id, :nome, :razao_social, :nome_fantasia, :cnpj, :cidade, :estado, :atualizado_em)
                    ON CONFLICT(empresa_id) DO UPDATE SET
@@ -185,94 +316,89 @@ class DB:
                      nome_fantasia=excluded.nome_fantasia, cnpj=excluded.cnpj,
                      cidade=excluded.cidade, estado=excluded.estado,
                      atualizado_em=excluded.atualizado_em""",
-                {"empresa_id": empresa_id, **dados},
-            )
-            self.con.commit()
+                {"empresa_id": empresa_id, **dados})
 
     def upsert_empresa_basica(self, empresa_id, dados):
         """Garante a empresa com nome amigavel (sem depender de sync do OMIE)."""
-        with self._lock:
-            existe = self.con.execute("SELECT 1 FROM empresa WHERE empresa_id=?", (empresa_id,)).fetchone()
+        with self._tx() as t:
+            existe = t.query_one("SELECT 1 AS um FROM empresa WHERE empresa_id=?", (empresa_id,))
             if not existe:
-                self.con.execute(
-                    "INSERT INTO empresa (empresa_id, nome, razao_social, cnpj) VALUES (?,?,?,?)",
-                    (empresa_id, dados.get("nome"), dados.get("razao_social") or dados.get("nome"), dados.get("cnpj") or ""))
+                t.exec("INSERT INTO empresa (empresa_id, nome, razao_social, cnpj) VALUES (?,?,?,?)",
+                       (empresa_id, dados.get("nome"), dados.get("razao_social") or dados.get("nome"),
+                        dados.get("cnpj") or ""))
             else:
-                self.con.execute(
+                t.exec(
                     """UPDATE empresa SET nome=COALESCE(NULLIF(nome,''),?),
                                           razao_social=COALESCE(NULLIF(razao_social,''),?)
                        WHERE empresa_id=?""",
                     (dados.get("nome"), dados.get("razao_social") or dados.get("nome"), empresa_id))
-            self.con.commit()
 
     def substituir(self, tabela, empresa_id, linhas, colunas):
         """Apaga os dados da empresa numa tabela e insere o lote novo (full refresh)."""
-        with self._lock:
-            cur = self.con.cursor()
-            cur.execute("DELETE FROM %s WHERE empresa_id = ?" % tabela, (empresa_id,))
+        with self._tx() as t:
+            t.exec("DELETE FROM %s WHERE empresa_id = ?" % tabela, (empresa_id,))
             if linhas:
                 placeholders = ",".join([":" + c for c in colunas])
-                sql = "INSERT INTO %s (%s) VALUES (%s)" % (tabela, ",".join(colunas), placeholders)
-                cur.executemany(sql, linhas)
-            self.con.commit()
+                t.exec_many("INSERT INTO %s (%s) VALUES (%s)" % (tabela, ",".join(colunas), placeholders), linhas)
 
     def substituir_titulos(self, empresa_id, tipo, linhas, colunas):
-        with self._lock:
-            cur = self.con.cursor()
-            cur.execute("DELETE FROM titulo WHERE empresa_id = ? AND tipo = ?", (empresa_id, tipo))
+        with self._tx() as t:
+            t.exec("DELETE FROM titulo WHERE empresa_id = ? AND tipo = ?", (empresa_id, tipo))
             if linhas:
                 placeholders = ",".join([":" + c for c in colunas])
-                sql = "INSERT INTO titulo (%s) VALUES (%s)" % (",".join(colunas), placeholders)
-                cur.executemany(sql, linhas)
-            self.con.commit()
+                t.exec_many("INSERT INTO titulo (%s) VALUES (%s)" % (",".join(colunas), placeholders), linhas)
 
     def registrar_sync(self, empresa_id, quando, resumo):
-        with self._lock:
-            self.con.execute(
+        with self._tx() as t:
+            t.exec(
                 """INSERT INTO sync_info (empresa_id, ultimo_sync, resumo)
                    VALUES (?, ?, ?)
                    ON CONFLICT(empresa_id) DO UPDATE SET ultimo_sync=excluded.ultimo_sync, resumo=excluded.resumo""",
-                (empresa_id, quando, json.dumps(resumo, ensure_ascii=False)),
-            )
-            self.con.commit()
+                (empresa_id, quando, json.dumps(resumo, ensure_ascii=False)))
 
     def reatribuir_holding(self):
         """Atribui empresa_real aos titulos das credenciais holding (ROI) pelo prefixo da conta."""
-        with self._lock:
+        with self._tx() as t:
             for cred in holding.CREDENCIAIS_HOLDING:
-                contas = self.con.execute("SELECT ncodcc, descricao FROM conta_corrente WHERE empresa_id=?", (cred,)).fetchall()
+                contas = t.exec("SELECT ncodcc, descricao FROM conta_corrente WHERE empresa_id=?", (cred,)).fetchall()
                 for c in contas:
-                    self.con.execute("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND ncodcc=?",
-                                     (holding.empresa_real(cred, c["descricao"]), cred, c["ncodcc"]))
-                self.con.execute("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND (empresa_real IS NULL OR empresa_real='')",
-                                 (cred, cred))
-            self.con.execute("UPDATE titulo SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
-            self.con.commit()
+                    t.exec("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND ncodcc=?",
+                           (holding.empresa_real(cred, c["descricao"]), cred, c["ncodcc"]))
+                t.exec("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND (empresa_real IS NULL OR empresa_real='')",
+                       (cred, cred))
+            t.exec("UPDATE titulo SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
 
-    # ---------- leitura ----------
+    # ---------------- leitura ----------------
+    def tem_titulos(self):
+        return self._query_one("SELECT 1 AS um FROM titulo LIMIT 1") is not None
+
+    def empresas_com_titulos(self):
+        rows = self._query(
+            "SELECT DISTINCT empresa_real FROM titulo WHERE empresa_real IS NOT NULL AND empresa_real <> ''")
+        return [r["empresa_real"] for r in rows]
+
     def empresas(self):
-        rows = self.con.execute(
+        rows = self._query(
             """SELECT e.*, s.ultimo_sync, s.resumo,
                       (SELECT COUNT(*) FROM titulo t WHERE t.empresa_real = e.empresa_id) AS qtd_titulos
                FROM empresa e LEFT JOIN sync_info s ON s.empresa_id = e.empresa_id
-               ORDER BY e.razao_social"""
-        ).fetchall()
+               ORDER BY e.razao_social""")
         return [dict(r) for r in rows]
 
     def filtros_disponiveis(self, empresas):
         """Contas, status e categorias existentes para as empresas selecionadas."""
         ph, params = _in("t.empresa_real", empresas)
         cond = ("WHERE " + ph) if ph else ""
-        contas = self.con.execute(
+        contas = self._query(
             """SELECT DISTINCT cc.ncodcc AS ncodcc, cc.descricao AS descricao, cc.empresa_id AS empresa_id
                FROM titulo t JOIN conta_corrente cc ON cc.empresa_id=t.empresa_id AND cc.ncodcc=t.ncodcc
-               %s ORDER BY cc.descricao""" % cond, params).fetchall()
-        status = self.con.execute(
-            "SELECT DISTINCT status FROM titulo t %s ORDER BY status" % cond, params).fetchall()
-        categorias = self.con.execute(
+               %s ORDER BY cc.descricao""" % cond, params)
+        status = self._query(
+            "SELECT DISTINCT status FROM titulo t %s ORDER BY status" % cond, params)
+        categorias = self._query(
             """SELECT DISTINCT t.cod_categoria AS codigo, cat.descricao AS descricao
                FROM titulo t LEFT JOIN categoria cat ON cat.empresa_id=t.empresa_id AND cat.codigo=t.cod_categoria
-               %s ORDER BY cat.descricao""" % cond, params).fetchall()
+               %s ORDER BY cat.descricao""" % cond, params)
         return {
             "contas": [dict(r) for r in contas],
             "status": [r["status"] for r in status if r["status"]],
@@ -299,7 +425,7 @@ class DB:
             ORDER BY %s %s, t.codigo %s
             LIMIT ? OFFSET ?
         """ % (_JOINS, where, col, direcao, direcao)
-        linhas = self.con.execute(sql, params + [por_pagina, offset]).fetchall()
+        linhas = self._query(sql, list(params) + [por_pagina, offset])
         return {
             "linhas": [dict(r) for r in linhas],
             "resumo": resumo,
@@ -312,7 +438,7 @@ class DB:
     def _resumo(self, where, params):
         sql = """SELECT t.tipo AS tipo, t.status AS status, COUNT(*) AS n, COALESCE(SUM(t.valor),0) AS soma
                  %s %s GROUP BY t.tipo, t.status""" % (_JOINS, where)
-        linhas = self.con.execute(sql, params).fetchall()
+        linhas = self._query(sql, params)
         total = 0
         soma_pagar = soma_receber = 0.0
         por_status = {}
@@ -334,7 +460,11 @@ class DB:
         }
 
     def agrupar(self, f, por):
-        """Agrupa os titulos filtrados por: categoria | conta | cliente | mes | empresa | status."""
+        """Agrupa os titulos filtrados por: categoria | conta | cliente | mes | empresa | status.
+
+        O rotulo usa MIN(...) para o SELECT ser valido no GROUP BY estrito do
+        Postgres (o SQLite aceitava coluna nao agregada e escolhia uma qualquer).
+        """
         where, params = _where(f)
         campo_mes = CAMPO_DATA.get(f.get("campo_data"), "t.data_vencimento")
         mapa = {
@@ -347,7 +477,7 @@ class DB:
         }
         chave_sql, label_sql = mapa.get(por, mapa["categoria"])
         sql = """
-            SELECT {chave} AS chave, {label} AS label,
+            SELECT {chave} AS chave, MIN({label}) AS label,
                    COUNT(*) AS n,
                    COALESCE(SUM(CASE WHEN t.tipo='pagar'   THEN t.valor END),0) AS soma_pagar,
                    COALESCE(SUM(CASE WHEN t.tipo='receber' THEN t.valor END),0) AS soma_receber
@@ -355,7 +485,7 @@ class DB:
             GROUP BY {chave}
             ORDER BY (COALESCE(SUM(t.valor),0)) DESC
         """.format(chave=chave_sql, label=label_sql, joins=_JOINS, where=where)
-        linhas = self.con.execute(sql, params).fetchall()
+        linhas = self._query(sql, params)
         res = []
         for r in linhas:
             d = dict(r)
@@ -372,7 +502,7 @@ class DB:
                "COALESCE(cat.descricao, t.cod_categoria, '(sem categoria)') AS categoria, "
                "COALESCE(SUM(t.valor),0) AS soma %s %s GROUP BY mes, t.tipo, categoria ORDER BY mes"
                % (campo, _JOINS, cond))
-        rows = self.con.execute(sql, params).fetchall()
+        rows = self._query(sql, params)
         meses = sorted({r["mes"] for r in rows if r["mes"]})
         rec, desp = {}, {}
         for r in rows:
@@ -412,32 +542,29 @@ class DB:
                    t.data_emissao, t.data_vencimento, t.data_previsao, t.valor
             %s %s ORDER BY %s %s
         """ % (_JOINS, where, col, direcao)
-        return [dict(r) for r in self.con.execute(sql, params).fetchall()]
+        return [dict(r) for r in self._query(sql, params)]
 
     # ================= usuarios =================
     def contar_usuarios(self):
-        return self.con.execute("SELECT COUNT(*) AS n FROM usuario").fetchone()["n"]
+        return self._query_one("SELECT COUNT(*) AS n FROM usuario")["n"]
 
     def criar_usuario(self, nome, login, senha_hash, salt, iteracoes, papel, criado_em):
-        with self._lock:
-            cur = self.con.execute(
+        with self._tx() as t:
+            return t.insert_id(
                 """INSERT INTO usuario (nome, login, senha_hash, salt, iteracoes, papel, ativo, criado_em)
                    VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
-                (nome, login, senha_hash, salt, iteracoes, papel, criado_em),
-            )
-            self.con.commit()
-            return cur.lastrowid
+                (nome, login, senha_hash, salt, iteracoes, papel, criado_em))
 
     def obter_usuario_por_login(self, login):
-        r = self.con.execute("SELECT * FROM usuario WHERE login = ?", (login,)).fetchone()
+        r = self._query_one("SELECT * FROM usuario WHERE login = ?", (login,))
         return dict(r) if r else None
 
     def obter_usuario(self, uid):
-        r = self.con.execute("SELECT * FROM usuario WHERE id = ?", (uid,)).fetchone()
+        r = self._query_one("SELECT * FROM usuario WHERE id = ?", (uid,))
         return dict(r) if r else None
 
     def listar_usuarios(self):
-        rows = self.con.execute("SELECT * FROM usuario ORDER BY nome, login").fetchall()
+        rows = self._query("SELECT * FROM usuario ORDER BY nome, login")
         out = []
         for r in rows:
             d = dict(r)
@@ -447,108 +574,108 @@ class DB:
         return out
 
     def atualizar_usuario(self, uid, nome, papel, ativo):
-        with self._lock:
-            self.con.execute("UPDATE usuario SET nome=?, papel=?, ativo=? WHERE id=?",
-                             (nome, papel, 1 if ativo else 0, uid))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("UPDATE usuario SET nome=?, papel=?, ativo=? WHERE id=?",
+                   (nome, papel, 1 if ativo else 0, uid))
 
     def definir_senha(self, uid, senha_hash, salt, iteracoes):
-        with self._lock:
-            self.con.execute("UPDATE usuario SET senha_hash=?, salt=?, iteracoes=? WHERE id=?",
-                             (senha_hash, salt, iteracoes, uid))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("UPDATE usuario SET senha_hash=?, salt=?, iteracoes=? WHERE id=?",
+                   (senha_hash, salt, iteracoes, uid))
 
     def excluir_usuario(self, uid):
-        with self._lock:
-            self.con.execute("DELETE FROM usuario WHERE id=?", (uid,))
-            self.con.execute("DELETE FROM usuario_empresa WHERE usuario_id=?", (uid,))
-            self.con.execute("DELETE FROM sessao WHERE usuario_id=?", (uid,))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("DELETE FROM usuario WHERE id=?", (uid,))
+            t.exec("DELETE FROM usuario_empresa WHERE usuario_id=?", (uid,))
+            t.exec("DELETE FROM sessao WHERE usuario_id=?", (uid,))
 
     def marcar_acesso(self, uid, quando):
-        with self._lock:
-            self.con.execute("UPDATE usuario SET ultimo_acesso=? WHERE id=?", (quando, uid))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("UPDATE usuario SET ultimo_acesso=? WHERE id=?", (quando, uid))
 
     def definir_empresas_usuario(self, uid, empresa_ids):
-        with self._lock:
-            self.con.execute("DELETE FROM usuario_empresa WHERE usuario_id=?", (uid,))
-            self.con.executemany("INSERT OR IGNORE INTO usuario_empresa (usuario_id, empresa_id) VALUES (?, ?)",
-                                 [(uid, e) for e in (empresa_ids or [])])
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("DELETE FROM usuario_empresa WHERE usuario_id=?", (uid,))
+            t.exec_many(
+                """INSERT INTO usuario_empresa (usuario_id, empresa_id) VALUES (?, ?)
+                   ON CONFLICT(usuario_id, empresa_id) DO NOTHING""",
+                [(uid, e) for e in (empresa_ids or [])])
 
     def empresas_do_usuario(self, uid):
         return [r["empresa_id"] for r in
-                self.con.execute("SELECT empresa_id FROM usuario_empresa WHERE usuario_id=?", (uid,)).fetchall()]
+                self._query("SELECT empresa_id FROM usuario_empresa WHERE usuario_id=?", (uid,))]
 
     # ================= sessoes =================
     def criar_sessao(self, token_hash, usuario_id, criado_em, expira_em, ip):
-        with self._lock:
-            self.con.execute("INSERT OR REPLACE INTO sessao (token_hash, usuario_id, criado_em, expira_em, ip) VALUES (?,?,?,?,?)",
-                             (token_hash, usuario_id, criado_em, expira_em, ip))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec(
+                """INSERT INTO sessao (token_hash, usuario_id, criado_em, expira_em, ip)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(token_hash) DO UPDATE SET
+                     usuario_id=excluded.usuario_id, criado_em=excluded.criado_em,
+                     expira_em=excluded.expira_em, ip=excluded.ip""",
+                (token_hash, usuario_id, criado_em, expira_em, ip))
 
     def obter_sessao(self, token_hash):
-        r = self.con.execute("SELECT * FROM sessao WHERE token_hash=?", (token_hash,)).fetchone()
+        r = self._query_one("SELECT * FROM sessao WHERE token_hash=?", (token_hash,))
         return dict(r) if r else None
 
     def excluir_sessao(self, token_hash):
-        with self._lock:
-            self.con.execute("DELETE FROM sessao WHERE token_hash=?", (token_hash,))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("DELETE FROM sessao WHERE token_hash=?", (token_hash,))
 
     def limpar_sessoes_expiradas(self, agora):
-        with self._lock:
-            self.con.execute("DELETE FROM sessao WHERE expira_em < ?", (agora,))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("DELETE FROM sessao WHERE expira_em < ?", (agora,))
 
     # ================= credenciais OMIE =================
     def listar_credenciais(self):
-        return [dict(r) for r in self.con.execute(
-            "SELECT empresa_id, nome, app_key, app_secret FROM empresa_credencial ORDER BY nome").fetchall()]
+        return [dict(r) for r in self._query(
+            "SELECT empresa_id, nome, app_key, app_secret FROM empresa_credencial ORDER BY nome")]
 
     def obter_credencial(self, empresa_id):
-        r = self.con.execute("SELECT * FROM empresa_credencial WHERE empresa_id=?", (empresa_id,)).fetchone()
+        r = self._query_one("SELECT * FROM empresa_credencial WHERE empresa_id=?", (empresa_id,))
         return dict(r) if r else None
 
     def salvar_credencial(self, empresa_id, nome, app_key, app_secret, criado_em):
-        with self._lock:
-            self.con.execute(
+        with self._tx() as t:
+            t.exec(
                 """INSERT INTO empresa_credencial (empresa_id, nome, app_key, app_secret, criado_em)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(empresa_id) DO UPDATE SET nome=excluded.nome, app_key=excluded.app_key, app_secret=excluded.app_secret""",
                 (empresa_id, nome, app_key, app_secret, criado_em))
-            ex = self.con.execute("SELECT 1 FROM empresa WHERE empresa_id=?", (empresa_id,)).fetchone()
+            ex = t.query_one("SELECT 1 AS um FROM empresa WHERE empresa_id=?", (empresa_id,))
             if ex:
-                self.con.execute("UPDATE empresa SET nome=COALESCE(NULLIF(nome,''),?) WHERE empresa_id=?", (nome, empresa_id))
+                t.exec("UPDATE empresa SET nome=COALESCE(NULLIF(nome,''),?) WHERE empresa_id=?", (nome, empresa_id))
             else:
-                self.con.execute("INSERT INTO empresa (empresa_id, nome, razao_social) VALUES (?,?,?)",
-                                 (empresa_id, nome, nome))
-            self.con.commit()
+                t.exec("INSERT INTO empresa (empresa_id, nome, razao_social) VALUES (?,?,?)",
+                       (empresa_id, nome, nome))
 
     def excluir_credencial(self, empresa_id):
-        with self._lock:
-            self.con.execute("DELETE FROM empresa_credencial WHERE empresa_id=?", (empresa_id,))
-            self.con.execute("DELETE FROM usuario_empresa WHERE empresa_id=?", (empresa_id,))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("DELETE FROM empresa_credencial WHERE empresa_id=?", (empresa_id,))
+            t.exec("DELETE FROM usuario_empresa WHERE empresa_id=?", (empresa_id,))
 
     # ================= config =================
     def config_get(self, chave, padrao=None):
-        r = self.con.execute("SELECT valor FROM app_config WHERE chave=?", (chave,)).fetchone()
+        r = self._query_one("SELECT valor FROM app_config WHERE chave=?", (chave,))
         return r["valor"] if r else padrao
 
     def config_set(self, chave, valor):
-        with self._lock:
-            self.con.execute("INSERT INTO app_config (chave, valor) VALUES (?, ?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
-                             (chave, valor))
-            self.con.commit()
+        with self._tx() as t:
+            t.exec("INSERT INTO app_config (chave, valor) VALUES (?, ?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
+                   (chave, valor))
 
-    # ================= importacao (1a execucao) =================
+    # ================= importacao (1a execucao, SOMENTE SQLite local) =================
     def importar_de(self, caminho_db_antigo):
         """Copia dados de relatorio (e usuarios/credenciais, se vazios) de um banco do
-        app 'relatorio omie' (K Finserv). Roda so quando este banco ainda nao tem titulos.
-        Retorna um resumo do que importou, ou None se o arquivo nao existe/nao e compativel.
+        app 'relatorio omie' (K Finserv). Caminho legado, exclusivo do backend SQLite
+        local (usa PRAGMA table_info e INSERT OR REPLACE); no Postgres e simplesmente
+        pulado — na nuvem nao existe arquivo antigo para importar.
+        Retorna um resumo do que importou, ou None se nao aplicavel.
         """
+        if self.pg:
+            return None
         if not caminho_db_antigo or not os.path.isfile(caminho_db_antigo):
             return None
         resumo = {}
@@ -652,10 +779,12 @@ def _where(f):
 
     busca = (f.get("busca") or "").strip()
     if busca:
-        like = "%" + busca + "%"
-        cond.append("(IFNULL(t.numero_documento,'') LIKE ? OR IFNULL(t.numero_parcela,'') LIKE ? "
-                    "OR IFNULL(cl.razao_social,'') LIKE ? OR IFNULL(cl.nome_fantasia,'') LIKE ? "
-                    "OR IFNULL(cat.descricao,'') LIKE ? OR IFNULL(t.observacao,'') LIKE ?)")
+        # LOWER(...) dos dois lados: o LIKE do SQLite ja era case-insensitive (ASCII),
+        # o do Postgres nao — assim o comportamento fica igual nos dois backends.
+        like = ("%" + busca + "%").lower()
+        cond.append("(LOWER(COALESCE(t.numero_documento,'')) LIKE ? OR LOWER(COALESCE(t.numero_parcela,'')) LIKE ? "
+                    "OR LOWER(COALESCE(cl.razao_social,'')) LIKE ? OR LOWER(COALESCE(cl.nome_fantasia,'')) LIKE ? "
+                    "OR LOWER(COALESCE(cat.descricao,'')) LIKE ? OR LOWER(COALESCE(t.observacao,'')) LIKE ?)")
         params += [like] * 6
 
     where = ("WHERE " + " AND ".join(cond)) if cond else ""

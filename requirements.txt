@@ -1,2 +1,3 @@
-# Este projeto usa SOMENTE a biblioteca padrão do Python — nenhuma dependência externa.
-# O arquivo existe para o Render detectar o runtime Python e rodar o build sem erro.
+# Backend Postgres (usado quando DATABASE_URL esta definida — producao no Render).
+# O caminho local continua 100% biblioteca padrao (sqlite3).
+psycopg[binary,pool]>=3.2

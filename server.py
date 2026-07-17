@@ -42,7 +42,10 @@ DB_ANTIGO = os.environ.get(
 PORT = int(os.environ.get("PORT", os.environ.get("PORTA", "8766")))
 HOST = os.environ.get("HOST", "0.0.0.0")
 SESSAO_HORAS = int(os.environ.get("SESSAO_HORAS", "12"))
-EM_NUVEM = bool(os.environ.get("RENDER") or os.environ.get("DATA_DIR"))
+# DATABASE_URL definida => backend Postgres (persistencia definitiva na nuvem);
+# ausente => SQLite local em DB_PATH, como sempre.
+DATABASE_URL = os.environ.get("DATABASE_URL") or None
+EM_NUVEM = bool(os.environ.get("RENDER") or os.environ.get("DATA_DIR") or DATABASE_URL)
 
 TIPOS_CONTEUDO = {
     ".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
@@ -52,7 +55,7 @@ TIPOS_CONTEUDO = {
 
 # ------------------------------------------------------------------ estado global
 os.makedirs(DATA_DIR, exist_ok=True)
-db = DB(DB_PATH)
+db = DB(DB_PATH, DATABASE_URL)
 
 _sync_lock = threading.Lock()
 sync_status = {
@@ -73,8 +76,8 @@ def agora():
 # ------------------------------------------------------------------ bootstrap
 def bootstrap():
     # 1) primeira execucao: importa dados ja sincronizados do app de tesouraria
-    tem_titulos = db.con.execute("SELECT 1 FROM titulo LIMIT 1").fetchone()
-    if not tem_titulos:
+    #    (somente no backend SQLite local; no Postgres nao ha arquivo antigo)
+    if not db.pg and not db.tem_titulos():
         try:
             resumo = db.importar_de(DB_ANTIGO)
             if resumo:
@@ -154,8 +157,7 @@ def empresas_relatorio(user):
     if not user:
         return []
     cred = {c["empresa_id"] for c in db.listar_credenciais()}
-    com_dados = {r["empresa_real"] for r in db.con.execute(
-        "SELECT DISTINCT empresa_real FROM titulo WHERE empresa_real IS NOT NULL AND empresa_real <> ''").fetchall()}
+    com_dados = set(db.empresas_com_titulos())
     fontes = sorted(cred | com_dados)
     if user["papel"] == "admin":
         return fontes
@@ -619,6 +621,7 @@ def main():
     print("=" * 60)
     print(" Analise Financeira OMIE  (app standalone)")
     print(" Ouvindo em %s:%d" % (HOST, PORT))
+    print(" Banco:", "Postgres (DATABASE_URL)" if db.pg else "SQLite em " + DB_PATH)
     print(" Empresas (contas OMIE):", len(empresas_config()))
     print(" Usuarios cadastrados:", db.contar_usuarios())
     print("=" * 60)
@@ -629,6 +632,8 @@ def main():
     except KeyboardInterrupt:
         print("\nEncerrando...")
         servidor.shutdown()
+    finally:
+        db.fechar()
 
 
 if __name__ == "__main__":
