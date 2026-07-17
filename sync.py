@@ -169,10 +169,13 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
                 realizado = o.get("nValorRealilzado")   # typo oficial da API
                 if realizado is None:
                     realizado = o.get("nValorRealizado")
+                desc = o.get("cDesCateg") or ""
                 linhas_orc.append({
-                    "empresa_id": empresa_id, "ano": ano, "mes": mes,
+                    "empresa_id": empresa_id,
+                    "empresa_real": holding.empresa_real(empresa_id, desc),
+                    "ano": ano, "mes": mes,
                     "cod_categoria": o.get("cCodCateg"),
-                    "descricao": o.get("cDesCateg") or "",
+                    "descricao": desc,
                     "valor_previsto": num(o.get("nValorPrevisto")),
                     "valor_realizado_omie": num(realizado),
                 })

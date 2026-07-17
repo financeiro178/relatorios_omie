@@ -205,7 +205,8 @@ function aplicarContexto() {
     return;
   }
   if (state.view === "orcado") {
-    $("#pageContext").innerHTML = "Orçamento de caixa do OMIE × realizado da análise (por vencimento) · todas as contas OMIE";
+    const c = contexto();
+    $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Orçamento de caixa do OMIE × realizado da análise (por vencimento)`;
     return;
   }
   const c = contexto();
@@ -243,9 +244,9 @@ function render() {
   const v = state.view;
   $$("#nav button").forEach((b) => b.classList.toggle("ativa", b.dataset.view === v));
   const ehAdmin = v === "admin";
-  const semToolbar = ehAdmin || v === "orcado";   // orcado tem escopo próprio (ano/mês)
+  const semToolbar = ehAdmin || v === "orcado";   // orcado tem período próprio (ano/mês)
   document.querySelector(".toolbar").style.display = semToolbar ? "none" : "";
-  $("#empresasSel").style.display = semToolbar ? "none" : "";
+  $("#empresasSel").style.display = ehAdmin ? "none" : "";   // filtro de empresas vale também no orcado
   $("#btnExportar").style.display = semToolbar ? "none" : "";
   $("#btnImprimir").style.display = ehAdmin ? "none" : "";
   aplicarContexto();

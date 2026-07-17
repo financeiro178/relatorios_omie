@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS sync_info (
 
 CREATE TABLE IF NOT EXISTS orcamento (
     empresa_id           TEXT,
+    empresa_real         TEXT,    -- holding dividida pelo prefixo [Empresa] da categoria
     ano                  {INT},
     mes                  {INT},
     cod_categoria        TEXT,
@@ -291,6 +292,18 @@ class DB:
         else:
             self.con.executescript(_schema_sql(False))
             self.con.commit()
+        self._migrar()
+
+    def _migrar(self):
+        """Migracao leve: adiciona colunas novas a bancos ja criados (idempotente)."""
+        for alter in ("ALTER TABLE orcamento ADD COLUMN empresa_real TEXT",):
+            try:
+                with self._tx() as t:
+                    t.exec(alter)
+            except Exception:  # noqa: BLE001 - coluna ja existe
+                pass
+        with self._tx() as t:
+            t.exec("UPDATE orcamento SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
 
     # ---------------- helpers de acesso (unico ponto que fala com o banco) ----------------
     @contextmanager
@@ -382,7 +395,17 @@ class DB:
                            (holding.empresa_real(cred, c["descricao"]), cred, c["ncodcc"]))
                 t.exec("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND (empresa_real IS NULL OR empresa_real='')",
                        (cred, cred))
+                # orcamento da holding: prefixo [Empresa] vem da descricao da categoria
+                orcs = t.exec("""SELECT DISTINCT o.cod_categoria AS cod,
+                                        COALESCE(NULLIF(o.descricao,''), cat.descricao, '') AS descricao
+                                 FROM orcamento o
+                                 LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
+                                 WHERE o.empresa_id=?""", (cred,)).fetchall()
+                for o in orcs:
+                    t.exec("UPDATE orcamento SET empresa_real=? WHERE empresa_id=? AND cod_categoria=?",
+                           (holding.empresa_real(cred, o["descricao"]), cred, o["cod"]))
             t.exec("UPDATE titulo SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
+            t.exec("UPDATE orcamento SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
 
     def substituir_orcamento(self, empresa_id, ano, linhas):
         """Full refresh do orcamento de caixa de uma empresa num ano."""
@@ -390,19 +413,20 @@ class DB:
             t.exec("DELETE FROM orcamento WHERE empresa_id = ? AND ano = ?", (empresa_id, ano))
             if linhas:
                 t.exec_many(
-                    """INSERT INTO orcamento (empresa_id, ano, mes, cod_categoria, descricao,
+                    """INSERT INTO orcamento (empresa_id, empresa_real, ano, mes, cod_categoria, descricao,
                                               valor_previsto, valor_realizado_omie)
-                       VALUES (:empresa_id, :ano, :mes, :cod_categoria, :descricao,
+                       VALUES (:empresa_id, :empresa_real, :ano, :mes, :cod_categoria, :descricao,
                                :valor_previsto, :valor_realizado_omie)""", linhas)
 
     def previsto_realizado(self, empresas, ano):
         """Orcamento de caixa do OMIE (previsto) x realizado da analise, por categoria e mes.
 
-        Ambos os lados usam o namespace da credencial (empresa_id) e agrupam pelo
-        ROTULO da categoria — igual a DRE; o realizado soma os titulos pela data de
-        vencimento dentro do ano.
+        Ambos os lados filtram por empresa_real (holding ROI dividida — orcamento pelo
+        prefixo [Empresa] da categoria, titulos pela conta) e agrupam pelo ROTULO da
+        categoria — igual a DRE; o realizado soma os titulos pela data de vencimento
+        dentro do ano.
         """
-        ph, params = _in("o.empresa_id", empresas)
+        ph, params = _in("o.empresa_real", empresas)
         cond = ("AND " + ph) if ph else ""
         prev = self._query(
             """SELECT COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria) AS categoria,
@@ -413,7 +437,7 @@ class DB:
                LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
                WHERE o.ano = ? %s
                GROUP BY categoria, mes""" % cond, [ano] + params)
-        ph2, params2 = _in("t.empresa_id", empresas)
+        ph2, params2 = _in("t.empresa_real", empresas)
         cond2 = ("AND " + ph2) if ph2 else ""
         real = self._query(
             """SELECT COALESCE(NULLIF(cat.descricao,''), t.cod_categoria, '(sem categoria)') AS categoria,
