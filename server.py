@@ -403,7 +403,8 @@ class Handler(BaseHTTPRequestHandler):
                 ano = int(qs.get("ano", [""])[0] or datetime.now().year)
             except ValueError:
                 ano = datetime.now().year
-            return self._enviar_json(db.previsto_realizado(empresas_relatorio(self.user), ano))
+            emps = empresas_relatorio(self.user) or ["\x00sem-acesso"]   # lista vazia NUNCA vira "sem filtro"
+            return self._enviar_json(db.previsto_realizado(emps, ano))
         if caminho == "/api/export.csv":
             return self._exportar_csv(self._filtros(qs))
         if caminho == "/api/admin/dados":

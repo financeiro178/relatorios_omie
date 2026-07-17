@@ -407,6 +407,7 @@ class DB:
         prev = self._query(
             """SELECT COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria) AS categoria,
                       o.mes AS mes, MIN(COALESCE(cat.natureza,'')) AS natureza,
+                      MIN(o.cod_categoria) AS cod,
                       SUM(o.valor_previsto) AS previsto, SUM(o.valor_realizado_omie) AS realizado_omie
                FROM orcamento o
                LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
@@ -417,7 +418,8 @@ class DB:
         real = self._query(
             """SELECT COALESCE(NULLIF(cat.descricao,''), t.cod_categoria, '(sem categoria)') AS categoria,
                       t.tipo AS tipo, substr(t.data_vencimento,6,2) AS mes,
-                      MIN(COALESCE(cat.natureza,'')) AS natureza, SUM(t.valor) AS soma
+                      MIN(COALESCE(cat.natureza,'')) AS natureza,
+                      MIN(COALESCE(t.cod_categoria,'')) AS cod, SUM(t.valor) AS soma
                FROM titulo t
                LEFT JOIN categoria cat ON cat.empresa_id = t.empresa_id AND cat.codigo = t.cod_categoria
                WHERE substr(t.data_vencimento,1,4) = ? %s
@@ -428,7 +430,8 @@ class DB:
         def linha(cat):
             if cat not in linhas:
                 linhas[cat] = {"categoria": cat, "previsto": [0.0] * 12, "realizado": [0.0] * 12,
-                                "realizado_omie": [0.0] * 12, "natureza": "", "receber": 0.0, "pagar": 0.0}
+                                "realizado_omie": [0.0] * 12, "natureza": "", "cod": "",
+                                "receber": 0.0, "pagar": 0.0}
             return linhas[cat]
 
         for r in prev:
@@ -438,6 +441,7 @@ class DB:
                 l["previsto"][m - 1] += r["previsto"] or 0
                 l["realizado_omie"][m - 1] += r["realizado_omie"] or 0
                 l["natureza"] = l["natureza"] or (r["natureza"] or "")
+                l["cod"] = l["cod"] or (r["cod"] or "")
         for r in real:
             try:
                 m = int(r["mes"])
@@ -447,14 +451,23 @@ class DB:
                 l = linha(r["categoria"])
                 l["realizado"][m - 1] += r["soma"] or 0
                 l["natureza"] = l["natureza"] or (r["natureza"] or "")
+                l["cod"] = l["cod"] or (r["cod"] or "")
                 l[r["tipo"] if r["tipo"] in ("receber", "pagar") else "pagar"] += r["soma"] or 0
 
         receitas, despesas = [], []
         for l in linhas.values():
             if not any(l["previsto"]) and not any(l["realizado"]):
                 continue
-            eh_receita = (l["receber"] > l["pagar"]) if (l["receber"] or l["pagar"]) \
-                else str(l["natureza"]).upper().startswith("R")
+            # classificacao: 1) tipo dos titulos realizados; 2) natureza R/D da categoria
+            # (sync grava a partir dos flags conta_receita/conta_despesa do OMIE);
+            # 3) prefixo do plano de contas OMIE ("1.*" = receitas, "2.*" = despesas)
+            nat = str(l["natureza"]).upper()
+            if l["receber"] or l["pagar"]:
+                eh_receita = l["receber"] > l["pagar"]
+            elif nat in ("R", "D"):
+                eh_receita = nat == "R"
+            else:
+                eh_receita = str(l["cod"]).startswith("1")
             item = {"categoria": l["categoria"], "previsto": [round(v, 2) for v in l["previsto"]],
                     "realizado": [round(v, 2) for v in l["realizado"]]}
             (receitas if eh_receita else despesas).append(item)

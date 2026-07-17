@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import holding
-from omie_client import OmieClient, OmieError
+from omie_client import OmieClient, OmieError, SemRegistros
 from util import num, para_iso
 
 
@@ -78,11 +78,20 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
                                "categoria_cadastro", registros_por_pagina=500)
     except OmieError:
         cats = []
+    def _natureza(c):
+        """'R' (receita) | 'D' (despesa) | '' — a partir dos flags do OMIE."""
+        if (c.get("conta_receita") or "").upper() == "S":
+            return "R"
+        if (c.get("conta_despesa") or "").upper() == "S":
+            return "D"
+        n = (c.get("natureza") or "").strip().upper()
+        return n if n in ("R", "D") else ""
+
     linhas = [{
         "empresa_id": empresa_id,
         "codigo": c.get("codigo"),
         "descricao": c.get("descricao") or c.get("descricao_padrao") or "",
-        "natureza": c.get("natureza") or c.get("conta_despesa") or "",
+        "natureza": _natureza(c),
     } for c in cats if c.get("codigo")]
     db.substituir("categoria", empresa_id, linhas,
                   ["empresa_id", "codigo", "descricao", "natureza"])
@@ -145,11 +154,15 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
     total_orc = 0
     for ano in (ano_atual - 1, ano_atual):
         linhas_orc = []
+        falhou = False
         for mes in range(1, 13):
             try:
                 r = cli.chamar("financas/caixa/", "ListarOrcamentos", {"nAno": ano, "nMes": mes})
+            except SemRegistros:
+                continue   # mes sem orcamento cadastrado — segue
             except OmieError:
-                continue   # mes sem orcamento (ou modulo nao habilitado) — segue
+                falhou = True   # falha real da API: NAO apagar o orcamento ja sincronizado
+                break
             for o in (r.get("ListaOrcamentos") or []):
                 if not o.get("cCodCateg"):
                     continue
@@ -163,8 +176,9 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
                     "valor_previsto": num(o.get("nValorPrevisto")),
                     "valor_realizado_omie": num(realizado),
                 })
-        db.substituir_orcamento(empresa_id, ano, linhas_orc)
-        total_orc += len(linhas_orc)
+        if not falhou:
+            db.substituir_orcamento(empresa_id, ano, linhas_orc)
+            total_orc += len(linhas_orc)
     resumo["orcamentos"] = total_orc
     passo("%d linhas de orcamento." % total_orc)
 
