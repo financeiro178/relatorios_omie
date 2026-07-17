@@ -404,7 +404,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 ano = datetime.now().year
             # respeita o filtro de empresas selecionado (ja restrito as permitidas)
-            return self._enviar_json(db.previsto_realizado(self._filtros(qs)["empresas"], ano))
+            base = qs.get("base", [None])[0]
+            return self._enviar_json(db.previsto_realizado(self._filtros(qs)["empresas"], ano, base))
         if caminho == "/api/export.csv":
             return self._exportar_csv(self._filtros(qs))
         if caminho == "/api/admin/dados":

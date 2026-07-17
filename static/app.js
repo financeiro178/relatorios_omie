@@ -208,7 +208,10 @@ function aplicarContexto() {
   }
   if (state.view === "orcado") {
     const c = contexto();
-    $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Previsto = títulos por vencimento &nbsp;·&nbsp; Realizado = pago/recebido`;
+    const txt = state.orcBaseAtiva === "orcamento"
+      ? "Orçado = Orçamento de Caixa do OMIE · Realizado = títulos do período (estouro em vermelho)"
+      : "Previsto = títulos por vencimento · Realizado = pago/recebido";
+    $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; ${txt}`;
     return;
   }
   const c = contexto();
@@ -563,7 +566,11 @@ async function renderOrcado() {
   try {
     if (!state.orcAno) state.orcAno = new Date().getFullYear();
     if (state.orcMes == null) state.orcMes = 0;
-    const j = await api("/api/orcado", { ano: state.orcAno });
+    const j = await api("/api/orcado", { ano: state.orcAno, ...(state.orcBase ? { base: state.orcBase } : {}) });
+    state.orcBaseAtiva = j.base;   // usado no contexto do topo
+    aplicarContexto();
+    const ehOrc = j.base === "orcamento";
+    const rotPrev = ehOrc ? "Orçado" : "Previsto";
     const anoAtual = new Date().getFullYear();
     const anos = [...new Set([...(j.anos || []), anoAtual - 1, anoAtual])].sort();
     const mes = state.orcMes;
@@ -572,6 +579,10 @@ async function renderOrcado() {
     const controles = `<div class="apagar-head" style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
       <div class="segmented">${anos.map((a) => `<button data-oano="${a}" class="${a === state.orcAno ? "ativa" : ""}">${a}</button>`).join("")}</div>
       <div class="segmented">${["Ano"].concat(MESES_NOMES).map((n, i) => `<button data-omes="${i}" class="${i === mes ? "ativa" : ""}">${n}</button>`).join("")}</div>
+      <div class="segmented" title="Base do Previsto">
+        <button data-obase="orcamento" class="${ehOrc ? "ativa" : ""}">Orçamento OMIE</button>
+        <button data-obase="fluxo" class="${!ehOrc ? "ativa" : ""}">Fluxo (a vencer)</button>
+      </div>
     </div>`;
 
     const secoes = [["Receitas", j.receitas || [], true], ["Despesas", j.despesas || [], false]];
@@ -585,14 +596,23 @@ async function renderOrcado() {
     const pct = (r, p) => p > 0 ? (r / p * 100) : null;
     const pctTxt = (r, p) => { const x = pct(r, p); return x == null ? "—" : x.toFixed(0) + "%"; };
 
+    const estouroDesp = Math.max(0, tot.Despesas.r - tot.Despesas.p);
+    const notaDesp = ehOrc
+      ? (estouroDesp > 0
+          ? `Realizado <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · <b class="neg">ESTOUROU ${moedaCurta(estouroDesp)}</b>`
+          : `Realizado <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · <b>${pctTxt(tot.Despesas.r, tot.Despesas.p)}</b> do orçado`)
+      : `Pago <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · <b>${pctTxt(tot.Despesas.r, tot.Despesas.p)}</b> do previsto`;
+    const notaRec = ehOrc
+      ? `Realizado <b class="pos">${moedaCurta(tot.Receitas.r)}</b> · <b>${pctTxt(tot.Receitas.r, tot.Receitas.p)}</b> do orçado`
+      : `Recebido <b class="pos">${moedaCurta(tot.Receitas.r)}</b> · <b>${pctTxt(tot.Receitas.r, tot.Receitas.p)}</b> do previsto`;
     const kpis = `<div class="grid cols-3" style="margin-bottom:16px">
-      <div class="kpi"><div class="topo"><span class="rotulo">Receitas — Previsto</span><span class="ic verde">${ic("receber")}</span></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Receitas — ${rotPrev}</span><span class="ic verde">${ic("receber")}</span></div>
         <div class="valor pos">${moedaCurta(tot.Receitas.p)}</div>
-        <div class="nota">Recebido <b class="pos">${moedaCurta(tot.Receitas.r)}</b> · <b>${pctTxt(tot.Receitas.r, tot.Receitas.p)}</b> do previsto</div></div>
-      <div class="kpi"><div class="topo"><span class="rotulo">Despesas — Previsto</span><span class="ic vermelho">${ic("pagar")}</span></div>
+        <div class="nota">${notaRec}</div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Despesas — ${rotPrev}</span><span class="ic vermelho">${ic("pagar")}</span></div>
         <div class="valor neg">${moedaCurta(tot.Despesas.p)}</div>
-        <div class="nota">Pago <b class="neg">${moedaCurta(tot.Despesas.r)}</b> · <b>${pctTxt(tot.Despesas.r, tot.Despesas.p)}</b> do previsto</div></div>
-      <div class="kpi"><div class="topo"><span class="rotulo">Resultado previsto (${esc(rotPeriodo)})</span><span class="ic">${ic("saldo")}</span></div>
+        <div class="nota">${notaDesp}</div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Resultado ${ehOrc ? "orçado" : "previsto"} (${esc(rotPeriodo)})</span><span class="ic">${ic("saldo")}</span></div>
         <div class="valor ${classeValor(tot.Receitas.p - tot.Despesas.p)}">${moedaCurta(tot.Receitas.p - tot.Despesas.p)}</div>
         <div class="nota">Realizado <b class="${classeValor(tot.Receitas.r - tot.Despesas.r)}">${moedaCurta(tot.Receitas.r - tot.Despesas.r)}</b></div></div>
     </div>`;
@@ -603,34 +623,61 @@ async function renderOrcado() {
       if (!linhas.length) return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3></div>
         <div class="panel-body">${vazioBloco("Sem lançamentos em " + rotPeriodo + ".")}</div></div>`;
       const corpo = linhas.map((l) => {
-        const aberto = l.p - l.r;   // ainda não liquidado
         const x = pct(l.r, l.p);
-        const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill r" style="width:${x == null ? 0 : Math.min(100, x).toFixed(0)}%"></div></div>`;
-        return `<tr>
-          <td class="forte">${esc(l.cat)}</td>
-          <td class="num dinheiro">${moeda(l.p)}</td>
-          <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
-          <td class="num dinheiro">${moeda(aberto)}</td>
-          <td class="num">${x == null ? "—" : x.toFixed(0) + "%"}</td>
-          <td>${barra}</td></tr>`;
+        let cols;
+        if (ehOrc) {
+          const delta = l.r - l.p;
+          const favoravel = ehReceita ? l.r >= l.p : l.r <= l.p;
+          const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill ${favoravel ? "r" : "p"}" style="width:${x == null ? (l.r ? 100 : 0) : Math.min(100, x).toFixed(0)}%"></div></div>`;
+          cols = `<td class="num dinheiro">${moeda(l.p)}</td>
+            <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
+            <td class="num dinheiro ${favoravel ? "pos" : "neg"}">${(delta >= 0 ? "+" : "") + moedaCurta(delta)}${!ehReceita && delta > 0 ? " ⚠" : ""}</td>
+            <td class="num">${x == null ? (l.r ? "sem orçado" : "—") : x.toFixed(0) + "%"}</td>
+            <td>${barra}</td>`;
+        } else {
+          const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill r" style="width:${x == null ? 0 : Math.min(100, x).toFixed(0)}%"></div></div>`;
+          cols = `<td class="num dinheiro">${moeda(l.p)}</td>
+            <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
+            <td class="num dinheiro">${moeda(l.p - l.r)}</td>
+            <td class="num">${x == null ? "—" : x.toFixed(0) + "%"}</td>
+            <td>${barra}</td>`;
+        }
+        return `<tr><td class="forte">${esc(l.cat)}</td>${cols}</tr>`;
       }).join("");
       const t = { p: linhas.reduce((s, l) => s + l.p, 0), r: linhas.reduce((s, l) => s + l.r, 0) };
-      return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3><span class="sub">${rotPeriodo} · ${linhas.length} categoria(s)</span></div>
+      const cab = ehOrc
+        ? `<th>Categoria</th><th class="num">Orçado</th><th class="num">Realizado</th><th class="num">Δ</th><th class="num">% do orçado</th><th style="width:110px">Progresso</th>`
+        : `<th>Categoria</th><th class="num">Previsto</th><th class="num">Realizado</th><th class="num">Em aberto</th><th class="num">% liq.</th><th style="width:110px">Progresso</th>`;
+      const rodape = ehOrc
+        ? `<td>TOTAL</td><td class="num">${moeda(t.p)}</td><td class="num ${ehReceita ? "pos" : "neg"}">${moeda(t.r)}</td>
+           <td class="num ${(ehReceita ? t.r >= t.p : t.r <= t.p) ? "pos" : "neg"}">${(t.r - t.p >= 0 ? "+" : "") + moedaCurta(t.r - t.p)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td>`
+        : `<td>TOTAL</td><td class="num">${moeda(t.p)}</td><td class="num ${ehReceita ? "pos" : "neg"}">${moeda(t.r)}</td>
+           <td class="num">${moeda(t.p - t.r)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td>`;
+      return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3><span class="sub">${rotPeriodo} · ${linhas.length} categoria(s)${ehOrc && !ehReceita ? " · estouros primeiro" : ""}</span></div>
         <div class="panel-body"><div class="tabela-wrap"><table>
-          <thead><tr><th>Categoria</th><th class="num">Previsto</th><th class="num">Realizado</th><th class="num">Em aberto</th><th class="num">% liq.</th><th style="width:110px">Progresso</th></tr></thead>
+          <thead><tr>${cab}</tr></thead>
           <tbody>${corpo}</tbody>
-          <tfoot><tr><td>TOTAL</td><td class="num">${moeda(t.p)}</td><td class="num ${ehReceita ? "pos" : "neg"}">${moeda(t.r)}</td>
-            <td class="num">${moeda(t.p - t.r)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td></tr></tfoot>
+          <tfoot><tr>${rodape}</tr></tfoot>
         </table></div></div></div>`;
     };
 
     const temAlgo = (j.receitas || []).length || (j.despesas || []).length;
-    const aviso = temAlgo ? "" : `<div class="panel"><div class="panel-body">${vazioBloco(
-      "Nenhum lançamento em " + state.orcAno + " para esta seleção. Ajuste o filtro de empresa/ano, ou clique em Sincronizar.")}</div></div>`;
+    let aviso = "";
+    if (!temAlgo) {
+      aviso = `<div class="panel"><div class="panel-body">${vazioBloco(
+        ehOrc
+          ? "Nenhum orçamento de caixa no OMIE para " + state.orcAno + " nesta seleção. Cadastre em Finanças → Orçamento e Sincronize, ou mude a base para Fluxo (a vencer)."
+          : "Nenhum lançamento em " + state.orcAno + " para esta seleção. Ajuste o filtro de empresa/ano, ou clique em Sincronizar.")}</div></div>`;
+    } else if (ehOrc && !j.tem_orcamento) {
+      aviso = `<div class="sub" style="margin-bottom:10px;color:var(--muted)">Sem orçamento cadastrado no OMIE para esta seleção — os valores de "Orçado" estão zerados. Cadastre em Finanças → Orçamento e Sincronize, ou use a base <b>Fluxo (a vencer)</b>.</div>`;
+    }
 
-    $(REL_ALVO).innerHTML = controles + kpis + tabela("Receitas", j.receitas || [], true) + tabela("Despesas", j.despesas || [], false) + aviso;
+    $(REL_ALVO).innerHTML = controles + (ehOrc && !j.tem_orcamento && temAlgo ? aviso : "") + kpis
+      + tabela("Receitas", j.receitas || [], true) + tabela("Despesas", j.despesas || [], false)
+      + (!temAlgo ? aviso : "");
     $$("[data-oano]").forEach((b) => b.addEventListener("click", () => { state.orcAno = +b.dataset.oano; renderOrcado(); }));
     $$("[data-omes]").forEach((b) => b.addEventListener("click", () => { state.orcMes = +b.dataset.omes; renderOrcado(); }));
+    $$("[data-obase]").forEach((b) => b.addEventListener("click", () => { state.orcBase = b.dataset.obase; renderOrcado(); }));
   } catch (e) { erro(e); }
 }
 

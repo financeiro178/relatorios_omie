@@ -447,14 +447,19 @@ class DB:
                        VALUES (:empresa_id, :empresa_real, :ano, :mes, :cod_categoria, :descricao,
                                :valor_previsto, :valor_realizado_omie)""", linhas)
 
-    def previsto_realizado(self, empresas, ano):
-        """Previsto x Realizado no criterio do Fluxo de Caixa do OMIE, direto dos titulos:
+    def previsto_realizado(self, empresas, ano, base=None):
+        """Previsto x Realizado por categoria e mes, em duas bases:
 
-        - **Previsto**  = TODOS os titulos com vencimento no mes (o esperado no periodo);
-        - **Realizado** = os que ja foram liquidados (PAGO/RECEBIDO/LIQUIDADO/BAIXADO/CONCILIADO).
+        - base "orcamento": Previsto = **Orcamento de Caixa do OMIE** (tabela orcamento);
+          Realizado = TODOS os titulos do periodo por vencimento (compromissado, pago ou
+          nao). E a visao de ESTOURO: realizado acima do orcado = estourou; despesas
+          ordenadas do maior estouro para o menor.
+        - base "fluxo": Previsto = todos os titulos por vencimento; Realizado = so os
+          liquidados (PAGO/RECEBIDO/...). Criterio do Fluxo de Caixa do OMIE.
 
-        Cancelados sao ignorados. Filtra por empresa_real (holding ROI dividida) e agrupa
-        pelo rotulo da categoria; classifica receita/despesa pelo tipo do titulo.
+        base=None escolhe sozinho: "orcamento" se ha orcamento no ano/selecao, senao
+        "fluxo". Cancelados ficam fora; filtro por empresa_real (holding dividida);
+        agrupamento pelo rotulo da categoria.
         """
         ph, params = _in("t.empresa_real", empresas)
         cond = ("AND " + ph) if ph else ""
@@ -472,15 +477,36 @@ class DB:
                  %s
                GROUP BY categoria, tipo, mes, liquidado""" % cond,
             [str(ano), "%CANCEL%"] + params)
+        pho, paramso = _in("o.empresa_real", empresas)
+        condo = ("AND " + pho) if pho else ""
+        orc = self._query(
+            """SELECT COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria) AS categoria,
+                      o.mes AS mes, MIN(COALESCE(cat.natureza,'')) AS natureza,
+                      MIN(o.cod_categoria) AS cod, SUM(o.valor_previsto) AS previsto
+               FROM orcamento o
+               LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
+               WHERE o.ano = ? %s
+               GROUP BY categoria, mes""" % condo, [ano] + paramso)
 
         linhas = {}
 
         def linha(cat):
             if cat not in linhas:
-                linhas[cat] = {"categoria": cat, "previsto": [0.0] * 12, "realizado": [0.0] * 12,
+                linhas[cat] = {"categoria": cat, "orcado": [0.0] * 12, "tot": [0.0] * 12,
+                                "liq": [0.0] * 12, "natureza": "", "cod": "",
                                 "receber": 0.0, "pagar": 0.0}
             return linhas[cat]
 
+        for r in orc:
+            try:
+                m = int(r["mes"])
+            except (TypeError, ValueError):
+                continue
+            if 1 <= m <= 12:
+                l = linha(r["categoria"])
+                l["orcado"][m - 1] += r["previsto"] or 0
+                l["natureza"] = l["natureza"] or (r["natureza"] or "")
+                l["cod"] = l["cod"] or (r["cod"] or "")
         for r in rows:
             try:
                 m = int(r["mes"])
@@ -490,27 +516,49 @@ class DB:
                 continue
             l = linha(r["categoria"])
             soma = r["soma"] or 0
-            l["previsto"][m - 1] += soma                 # previsto = tudo que vence no mes
+            l["tot"][m - 1] += soma                      # tudo que vence no mes
             if r["liquidado"]:
-                l["realizado"][m - 1] += soma            # realizado = o subconjunto liquidado
+                l["liq"][m - 1] += soma                  # subconjunto liquidado
             l[r["tipo"] if r["tipo"] in ("receber", "pagar") else "pagar"] += soma
+
+        tem_orcamento = any(any(l["orcado"]) for l in linhas.values())
+        if base not in ("orcamento", "fluxo"):
+            base = "orcamento" if tem_orcamento else "fluxo"
 
         receitas, despesas = [], []
         for l in linhas.values():
-            if not any(l["previsto"]) and not any(l["realizado"]):
+            prev = l["orcado"] if base == "orcamento" else l["tot"]
+            real = l["tot"] if base == "orcamento" else l["liq"]
+            if not any(prev) and not any(real):
                 continue
-            eh_receita = l["receber"] >= l["pagar"]      # todo titulo tem tipo definido
-            item = {"categoria": l["categoria"], "previsto": [round(v, 2) for v in l["previsto"]],
-                    "realizado": [round(v, 2) for v in l["realizado"]]}
+            # classificacao: 1) tipo dos titulos; 2) natureza R/D; 3) prefixo do plano ("1.*")
+            nat = str(l["natureza"]).upper()
+            if l["receber"] or l["pagar"]:
+                eh_receita = l["receber"] >= l["pagar"]
+            elif nat in ("R", "D"):
+                eh_receita = nat == "R"
+            else:
+                eh_receita = str(l["cod"]).startswith("1")
+            item = {"categoria": l["categoria"], "previsto": [round(v, 2) for v in prev],
+                    "realizado": [round(v, 2) for v in real]}
             (receitas if eh_receita else despesas).append(item)
-        chave = lambda i: -max(sum(i["previsto"]), sum(i["realizado"]))  # noqa: E731
-        receitas.sort(key=chave)
-        despesas.sort(key=chave)
-        anos = [int(r["ano"]) for r in self._query(
+
+        if base == "orcamento":
+            # o que estourou primeiro: despesas acima do orcado; receitas abaixo do orcado
+            despesas.sort(key=lambda i: -(sum(i["realizado"]) - sum(i["previsto"])))
+            receitas.sort(key=lambda i: -(sum(i["previsto"]) - sum(i["realizado"])))
+        else:
+            chave = lambda i: -max(sum(i["previsto"]), sum(i["realizado"]))  # noqa: E731
+            receitas.sort(key=chave)
+            despesas.sort(key=chave)
+
+        anos_tit = {int(r["ano"]) for r in self._query(
             """SELECT DISTINCT substr(t.data_vencimento,1,4) AS ano FROM titulo t
-               WHERE t.data_vencimento IS NOT NULL AND t.data_vencimento <> '' %s
-               ORDER BY ano""" % cond, params) if r["ano"]]
-        return {"ano": ano, "anos": anos, "receitas": receitas, "despesas": despesas}
+               WHERE t.data_vencimento IS NOT NULL AND t.data_vencimento <> '' %s""" % cond, params) if r["ano"]}
+        anos_orc = {int(r["ano"]) for r in self._query(
+            "SELECT DISTINCT o.ano AS ano FROM orcamento o WHERE 1=1 %s" % condo, paramso)}
+        return {"ano": ano, "anos": sorted(anos_tit | anos_orc), "base": base,
+                "tem_orcamento": tem_orcamento, "receitas": receitas, "despesas": despesas}
 
     # ---------------- leitura ----------------
     def tem_titulos(self):
