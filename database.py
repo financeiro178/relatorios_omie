@@ -319,10 +319,11 @@ class DB:
 
     def _migrar(self):
         """Migracao leve e idempotente: adiciona colunas novas a bancos ja existentes.
-        (ALTER TABLE ... ADD COLUMN tem a mesma sintaxe no SQLite e no Postgres; se a
-        coluna ja existe, o erro e engolido.)"""
+        (ALTER TABLE ... ADD COLUMN tem a mesma sintaxe no SQLite e no Postgres; coluna
+        ja existente falha e e ignorada. UNICA definicao — nao duplicar este metodo!)"""
         real = "DOUBLE PRECISION" if self.pg else "REAL"
         for sql in (
+            "ALTER TABLE orcamento ADD COLUMN empresa_real TEXT",
             "ALTER TABLE conta_corrente ADD COLUMN empresa_real TEXT",
             "ALTER TABLE conta_corrente ADD COLUMN saldo_atual %s" % real,
             "ALTER TABLE conta_corrente ADD COLUMN saldo_data TEXT",
@@ -332,18 +333,15 @@ class DB:
                     t.exec(sql)
             except Exception:  # noqa: BLE001 - coluna ja existe
                 pass
-        self._migrar()
-
-    def _migrar(self):
-        """Migracao leve: adiciona colunas novas a bancos ja criados (idempotente)."""
-        for alter in ("ALTER TABLE orcamento ADD COLUMN empresa_real TEXT",):
-            try:
-                with self._tx() as t:
-                    t.exec(alter)
-            except Exception:  # noqa: BLE001 - coluna ja existe
-                pass
         with self._tx() as t:
             t.exec("UPDATE orcamento SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
+            t.exec("UPDATE conta_corrente SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
+        # confere que a migracao pegou — se algo falhou de verdade, aparece no log do servidor
+        try:
+            self._query_one("SELECT empresa_real, saldo_atual, saldo_data FROM conta_corrente LIMIT 1")
+            self._query_one("SELECT empresa_real FROM orcamento LIMIT 1")
+        except Exception as e:  # noqa: BLE001
+            print(" ATENCAO: migracao de colunas NAO aplicou:", repr(e)[:200])
 
     # ---------------- helpers de acesso (unico ponto que fala com o banco) ----------------
     @contextmanager
