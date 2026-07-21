@@ -572,12 +572,15 @@ async function renderOrcado() {
     const ehOrc = j.base === "orcamento";
     const rotPrev = ehOrc ? "Orçado" : "Previsto";
     const anoAtual = new Date().getFullYear();
+    // dropdown (títulos parcelados podem vencer décadas à frente — botões estourariam a tela)
     const anos = [...new Set([...(j.anos || []), anoAtual - 1, anoAtual])].sort();
     const mes = state.orcMes;
     const rotPeriodo = mes ? `${MESES_NOMES[mes - 1]}/${state.orcAno}` : `Ano de ${state.orcAno}`;
 
+    const selAno = `<select id="orcAnoSel" style="height:36px;border:1px solid var(--line);border-radius:9px;padding:0 10px;font-family:inherit;font-size:13px;font-weight:600;background:var(--surface,#fff)">
+      ${anos.map((a) => `<option value="${a}" ${a === state.orcAno ? "selected" : ""}>${a}</option>`).join("")}</select>`;
     const controles = `<div class="apagar-head" style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-      <div class="segmented">${anos.map((a) => `<button data-oano="${a}" class="${a === state.orcAno ? "ativa" : ""}">${a}</button>`).join("")}</div>
+      ${selAno}
       <div class="segmented">${["Ano"].concat(MESES_NOMES).map((n, i) => `<button data-omes="${i}" class="${i === mes ? "ativa" : ""}">${n}</button>`).join("")}</div>
       <div class="segmented" title="Base do Previsto">
         <button data-obase="orcamento" class="${ehOrc ? "ativa" : ""}">Orçamento OMIE</button>
@@ -675,7 +678,7 @@ async function renderOrcado() {
     $(REL_ALVO).innerHTML = controles + (ehOrc && !j.tem_orcamento && temAlgo ? aviso : "") + kpis
       + tabela("Receitas", j.receitas || [], true) + tabela("Despesas", j.despesas || [], false)
       + (!temAlgo ? aviso : "");
-    $$("[data-oano]").forEach((b) => b.addEventListener("click", () => { state.orcAno = +b.dataset.oano; renderOrcado(); }));
+    $("#orcAnoSel").addEventListener("change", (e) => { state.orcAno = +e.target.value; renderOrcado(); });
     $$("[data-omes]").forEach((b) => b.addEventListener("click", () => { state.orcMes = +b.dataset.omes; renderOrcado(); }));
     $$("[data-obase]").forEach((b) => b.addEventListener("click", () => { state.orcBase = b.dataset.obase; renderOrcado(); }));
   } catch (e) { erro(e); }
