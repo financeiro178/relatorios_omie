@@ -93,7 +93,6 @@ const VIEWS = [
   { id: "categoria", nome: "Categorias", ico: "tag" },
   { id: "departamento", nome: "Departamentos", ico: "predio" },
   { id: "conta", nome: "Contas", ico: "bank" },
-  { id: "cliente", nome: "Clientes", ico: "users" },
   { id: "titulos", nome: "Títulos", ico: "list" },
 ];
 function viewInfo(id) { return VIEWS.concat([{ id: "admin", nome: "Administração" }]).find((v) => v.id === id) || { nome: "" }; }
