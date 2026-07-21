@@ -464,7 +464,8 @@ class DB:
         ph, params = _in("t.empresa_real", empresas)
         cond = ("AND " + ph) if ph else ""
         rows = self._query(
-            """SELECT COALESCE(NULLIF(cat.descricao,''), t.cod_categoria, '(sem categoria)') AS categoria,
+            """SELECT COALESCE(t.cod_categoria, '') AS cod,
+                      MIN(COALESCE(NULLIF(cat.descricao,''), t.cod_categoria, '(sem categoria)')) AS categoria,
                       t.tipo AS tipo, substr(t.data_vencimento,6,2) AS mes,
                       CASE WHEN UPPER(COALESCE(t.status,'')) IN
                                 ('PAGO','RECEBIDO','LIQUIDADO','BAIXADO','CONCILIADO')
@@ -475,38 +476,61 @@ class DB:
                WHERE substr(t.data_vencimento,1,4) = ?
                  AND UPPER(COALESCE(t.status,'')) NOT LIKE ?
                  %s
-               GROUP BY categoria, tipo, mes, liquidado""" % cond,
+               GROUP BY cod, tipo, mes, liquidado""" % cond,
             [str(ano), "%CANCEL%"] + params)
         pho, paramso = _in("o.empresa_real", empresas)
         condo = ("AND " + pho) if pho else ""
         orc = self._query(
-            """SELECT COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria) AS categoria,
+            """SELECT o.cod_categoria AS cod,
+                      MIN(COALESCE(NULLIF(cat.descricao,''), NULLIF(o.descricao,''), o.cod_categoria)) AS categoria,
                       o.mes AS mes, MIN(COALESCE(cat.natureza,'')) AS natureza,
-                      MIN(o.cod_categoria) AS cod, SUM(o.valor_previsto) AS previsto
+                      SUM(o.valor_previsto) AS previsto
                FROM orcamento o
                LEFT JOIN categoria cat ON cat.empresa_id = o.empresa_id AND cat.codigo = o.cod_categoria
                WHERE o.ano = ? %s
-               GROUP BY categoria, mes""" % condo, [ano] + paramso)
+               GROUP BY cod, mes""" % condo, [ano] + paramso)
+
+        # ---- hierarquia pelo codigo ("2.01.03" e filho de "2.01", que e filho de "2") ----
+        todos_cods = {str(r["cod"]) for r in rows if r["cod"]} | {str(r["cod"]) for r in orc if r["cod"]}
+
+        def eh_pai(c):
+            pref = c + "."
+            return any(o != c and o.startswith(pref) for o in todos_cods)
+
+        # cods de grupo COM previsto proprio cujos descendentes tambem tem previsto:
+        # sao os totalizadores que o OMIE devolve — descartar para nao duplicar a soma
+        orc_por_cod = {}
+        rotulos = {}
+        for r in orc:
+            c = str(r["cod"] or "")
+            rotulos.setdefault(c, r["categoria"])
+            orc_por_cod.setdefault(c, []).append(r)
+
+        def descendente_tem_orcamento(c):
+            pref = c + "."
+            return any(o.startswith(pref) and any((x["previsto"] or 0) for x in orc_por_cod[o])
+                       for o in orc_por_cod if o != c)
 
         linhas = {}
 
-        def linha(cat):
-            if cat not in linhas:
-                linhas[cat] = {"categoria": cat, "orcado": [0.0] * 12, "tot": [0.0] * 12,
-                                "liq": [0.0] * 12, "natureza": "", "cod": "",
-                                "receber": 0.0, "pagar": 0.0}
-            return linhas[cat]
+        def linha(c, nome):
+            if c not in linhas:
+                linhas[c] = {"cod": c, "categoria": nome, "orcado": [0.0] * 12, "tot": [0.0] * 12,
+                              "liq": [0.0] * 12, "natureza": "", "receber": 0.0, "pagar": 0.0}
+            return linhas[c]
 
-        for r in orc:
-            try:
-                m = int(r["mes"])
-            except (TypeError, ValueError):
-                continue
-            if 1 <= m <= 12:
-                l = linha(r["categoria"])
-                l["orcado"][m - 1] += r["previsto"] or 0
-                l["natureza"] = l["natureza"] or (r["natureza"] or "")
-                l["cod"] = l["cod"] or (r["cod"] or "")
+        for c, lista in orc_por_cod.items():
+            if eh_pai(c) and descendente_tem_orcamento(c):
+                continue   # totalizador do OMIE — a soma vem das folhas
+            for r in lista:
+                try:
+                    m = int(r["mes"])
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= m <= 12:
+                    l = linha(c, r["categoria"])
+                    l["orcado"][m - 1] += r["previsto"] or 0
+                    l["natureza"] = l["natureza"] or (r["natureza"] or "")
         for r in rows:
             try:
                 m = int(r["mes"])
@@ -514,7 +538,9 @@ class DB:
                 continue
             if not (1 <= m <= 12):
                 continue
-            l = linha(r["categoria"])
+            c = str(r["cod"] or "")
+            rotulos.setdefault(c, r["categoria"])
+            l = linha(c, r["categoria"])
             soma = r["soma"] or 0
             l["tot"][m - 1] += soma                      # tudo que vence no mes
             if r["liquidado"]:
@@ -526,6 +552,7 @@ class DB:
             base = "orcamento" if tem_orcamento else "fluxo"
 
         receitas, despesas = [], []
+        ancestrais = set()
         for l in linhas.values():
             prev = l["orcado"] if base == "orcamento" else l["tot"]
             real = l["tot"] if base == "orcamento" else l["liq"]
@@ -539,9 +566,23 @@ class DB:
                 eh_receita = nat == "R"
             else:
                 eh_receita = str(l["cod"]).startswith("1")
-            item = {"categoria": l["categoria"], "previsto": [round(v, 2) for v in prev],
+            item = {"cod": l["cod"], "categoria": l["categoria"],
+                    "previsto": [round(v, 2) for v in prev],
                     "realizado": [round(v, 2) for v in real]}
             (receitas if eh_receita else despesas).append(item)
+            partes = str(l["cod"]).split(".")
+            for i in range(1, len(partes)):
+                ancestrais.add(".".join(partes[:i]))
+
+        # rotulos dos niveis de grupo (para a "escadinha" no frontend)
+        faltam = [c for c in ancestrais if c not in rotulos]
+        if faltam:
+            phc, paramsc = _in("codigo", faltam)
+            for r in self._query(
+                    "SELECT codigo AS cod, MIN(COALESCE(NULLIF(descricao,''), codigo)) AS nome "
+                    "FROM categoria WHERE %s GROUP BY codigo" % phc, paramsc):
+                rotulos.setdefault(str(r["cod"]), r["nome"])
+        rotulos_grupos = {c: rotulos.get(c, c) for c in ancestrais}
 
         if base == "orcamento":
             # o que estourou primeiro: despesas acima do orcado; receitas abaixo do orcado
@@ -558,7 +599,8 @@ class DB:
         anos_orc = {int(r["ano"]) for r in self._query(
             "SELECT DISTINCT o.ano AS ano FROM orcamento o WHERE 1=1 %s" % condo, paramso)}
         return {"ano": ano, "anos": sorted(anos_tit | anos_orc), "base": base,
-                "tem_orcamento": tem_orcamento, "receitas": receitas, "despesas": despesas}
+                "tem_orcamento": tem_orcamento, "receitas": receitas, "despesas": despesas,
+                "rotulos": rotulos_grupos}
 
     # ---------------- leitura ----------------
     def tem_titulos(self):

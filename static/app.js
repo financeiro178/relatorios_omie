@@ -566,9 +566,40 @@ async function renderOrcado() {
   try {
     if (!state.orcAno) state.orcAno = new Date().getFullYear();
     if (state.orcMes == null) state.orcMes = 0;
+    if (!state.orcAberto) state.orcAberto = new Set();
     const j = await api("/api/orcado", { ano: state.orcAno, ...(state.orcBase ? { base: state.orcBase } : {}) });
+    state.orcDados = j;
     state.orcBaseAtiva = j.base;   // usado no contexto do topo
     aplicarContexto();
+    desenharOrcado();
+  } catch (e) { erro(e); }
+}
+
+// monta a "escadinha": árvore pelos códigos do plano de contas (2 → 2.01 → 2.01.03)
+function montarArvoreOrc(itens, rotulos) {
+  const raiz = { filhos: {} };
+  for (const i of itens) {
+    const cod = String(i.cod || "");
+    const partes = cod ? cod.split(".") : ["(sem)"];
+    let no = raiz, caminho = "";
+    for (let d = 0; d < partes.length; d++) {
+      caminho = d === 0 ? partes[0] : caminho + "." + partes[d];
+      if (!no.filhos[caminho]) {
+        no.filhos[caminho] = { chave: caminho, nome: (rotulos || {})[caminho] || caminho,
+          previsto: new Array(12).fill(0), realizado: new Array(12).fill(0), filhos: {} };
+      }
+      no = no.filhos[caminho];
+      for (let m = 0; m < 12; m++) { no.previsto[m] += i.previsto[m] || 0; no.realizado[m] += i.realizado[m] || 0; }
+    }
+    no.nome = i.categoria;   // a folha usa o nome real da categoria
+  }
+  return raiz;
+}
+
+function desenharOrcado() {
+  try {
+    const j = state.orcDados;
+    if (!j) return;
     const ehOrc = j.base === "orcamento";
     const rotPrev = ehOrc ? "Orçado" : "Previsto";
     const anoAtual = new Date().getFullYear();
@@ -620,34 +651,55 @@ async function renderOrcado() {
         <div class="nota">Realizado <b class="${classeValor(tot.Receitas.r - tot.Despesas.r)}">${moedaCurta(tot.Receitas.r - tot.Despesas.r)}</b></div></div>
     </div>`;
 
+    const colunas = (p, r, ehReceita) => {
+      const x = pct(r, p);
+      if (ehOrc) {
+        const delta = r - p;
+        const favoravel = ehReceita ? r >= p : r <= p;
+        const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill ${favoravel ? "r" : "p"}" style="width:${x == null ? (r ? 100 : 0) : Math.min(100, x).toFixed(0)}%"></div></div>`;
+        return `<td class="num dinheiro">${moeda(p)}</td>
+          <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(r)}</td>
+          <td class="num dinheiro ${favoravel ? "pos" : "neg"}">${(delta >= 0 ? "+" : "") + moedaCurta(delta)}${!ehReceita && delta > 0 ? " ⚠" : ""}</td>
+          <td class="num">${x == null ? (r ? "sem orçado" : "—") : x.toFixed(0) + "%"}</td>
+          <td>${barra}</td>`;
+      }
+      const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill r" style="width:${x == null ? 0 : Math.min(100, x).toFixed(0)}%"></div></div>`;
+      return `<td class="num dinheiro">${moeda(p)}</td>
+        <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(r)}</td>
+        <td class="num dinheiro">${moeda(p - r)}</td>
+        <td class="num">${x == null ? "—" : x.toFixed(0) + "%"}</td>
+        <td>${barra}</td>`;
+    };
+
     const tabela = (nome, itens, ehReceita) => {
-      const linhas = itens.map((i) => ({ cat: i.categoria, p: somaPeriodo(i.previsto, mes), r: somaPeriodo(i.realizado, mes) }))
-        .filter((l) => l.p || l.r);
-      if (!linhas.length) return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3></div>
+      const vivos = itens.filter((i) => somaPeriodo(i.previsto, mes) || somaPeriodo(i.realizado, mes));
+      if (!vivos.length) return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3></div>
         <div class="panel-body">${vazioBloco("Sem lançamentos em " + rotPeriodo + ".")}</div></div>`;
-      const corpo = linhas.map((l) => {
-        const x = pct(l.r, l.p);
-        let cols;
-        if (ehOrc) {
-          const delta = l.r - l.p;
-          const favoravel = ehReceita ? l.r >= l.p : l.r <= l.p;
-          const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill ${favoravel ? "r" : "p"}" style="width:${x == null ? (l.r ? 100 : 0) : Math.min(100, x).toFixed(0)}%"></div></div>`;
-          cols = `<td class="num dinheiro">${moeda(l.p)}</td>
-            <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
-            <td class="num dinheiro ${favoravel ? "pos" : "neg"}">${(delta >= 0 ? "+" : "") + moedaCurta(delta)}${!ehReceita && delta > 0 ? " ⚠" : ""}</td>
-            <td class="num">${x == null ? (l.r ? "sem orçado" : "—") : x.toFixed(0) + "%"}</td>
-            <td>${barra}</td>`;
-        } else {
-          const barra = `<div class="hbar-track" style="min-width:90px"><div class="hbar-fill r" style="width:${x == null ? 0 : Math.min(100, x).toFixed(0)}%"></div></div>`;
-          cols = `<td class="num dinheiro">${moeda(l.p)}</td>
-            <td class="num dinheiro ${ehReceita ? "pos" : "neg"}">${moeda(l.r)}</td>
-            <td class="num dinheiro">${moeda(l.p - l.r)}</td>
-            <td class="num">${x == null ? "—" : x.toFixed(0) + "%"}</td>
-            <td>${barra}</td>`;
-        }
-        return `<tr><td class="forte">${esc(l.cat)}</td>${cols}</tr>`;
-      }).join("");
-      const t = { p: linhas.reduce((s, l) => s + l.p, 0), r: linhas.reduce((s, l) => s + l.r, 0) };
+      const arvore = montarArvoreOrc(vivos, j.rotulos);
+      const ordenar = (nos) => nos.sort((a, b) => {
+        const pa = somaPeriodo(a.previsto, mes), ra = somaPeriodo(a.realizado, mes);
+        const pb = somaPeriodo(b.previsto, mes), rb = somaPeriodo(b.realizado, mes);
+        if (ehOrc) return ehReceita ? (pb - rb) - (pa - ra) : (rb - pb) - (ra - pa);   // desfavorável primeiro
+        return Math.max(pb, rb) - Math.max(pa, ra);
+      });
+      const linhaHTML = (no, prof) => {
+        const p = somaPeriodo(no.previsto, mes), r = somaPeriodo(no.realizado, mes);
+        if (!p && !r) return "";
+        const filhos = ordenar(Object.values(no.filhos).filter((f) => somaPeriodo(f.previsto, mes) || somaPeriodo(f.realizado, mes)));
+        const temFilhos = filhos.length > 0;
+        const aberto = state.orcAberto.has(no.chave);
+        const seta = `<span style="display:inline-block;width:15px;color:var(--muted)">${temFilhos ? (aberto ? "▾" : "▸") : ""}</span>`;
+        const nomeCell = `<td class="${temFilhos ? "forte" : ""}" style="padding-left:${10 + prof * 22}px${temFilhos ? ";cursor:pointer;user-select:none" : ""}"${temFilhos ? ` data-orctoggle="${esc(no.chave)}" title="clique para ${aberto ? "recolher" : "detalhar"}"` : ""}>${seta}${esc(no.nome)}</td>`;
+        let html = `<tr>${nomeCell}${colunas(p, r, ehReceita)}</tr>`;
+        if (temFilhos && aberto) html += filhos.map((f) => linhaHTML(f, prof + 1)).join("");
+        return html;
+      };
+      let topo = ordenar(Object.values(arvore.filhos));
+      // raiz única (ex.: todo o plano debaixo de "2") não agrega nada — desce direto aos grupos
+      while (topo.length === 1 && Object.keys(topo[0].filhos).length) topo = ordenar(Object.values(topo[0].filhos));
+      const corpo = topo.map((n) => linhaHTML(n, 0)).join("");
+      const t = { p: vivos.reduce((s, i) => s + somaPeriodo(i.previsto, mes), 0),
+                  r: vivos.reduce((s, i) => s + somaPeriodo(i.realizado, mes), 0) };
       const cab = ehOrc
         ? `<th>Categoria</th><th class="num">Orçado</th><th class="num">Realizado</th><th class="num">Δ</th><th class="num">% do orçado</th><th style="width:110px">Progresso</th>`
         : `<th>Categoria</th><th class="num">Previsto</th><th class="num">Realizado</th><th class="num">Em aberto</th><th class="num">% liq.</th><th style="width:110px">Progresso</th>`;
@@ -656,7 +708,7 @@ async function renderOrcado() {
            <td class="num ${(ehReceita ? t.r >= t.p : t.r <= t.p) ? "pos" : "neg"}">${(t.r - t.p >= 0 ? "+" : "") + moedaCurta(t.r - t.p)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td>`
         : `<td>TOTAL</td><td class="num">${moeda(t.p)}</td><td class="num ${ehReceita ? "pos" : "neg"}">${moeda(t.r)}</td>
            <td class="num">${moeda(t.p - t.r)}</td><td class="num">${pctTxt(t.r, t.p)}</td><td></td>`;
-      return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3><span class="sub">${rotPeriodo} · ${linhas.length} categoria(s)${ehOrc && !ehReceita ? " · estouros primeiro" : ""}</span></div>
+      return `<div class="panel" style="margin-bottom:16px"><div class="panel-head"><h3>${nome}</h3><span class="sub">${rotPeriodo} · ${vivos.length} categoria(s) · clique no grupo para detalhar${ehOrc && !ehReceita ? " · estouros primeiro" : ""}</span></div>
         <div class="panel-body"><div class="tabela-wrap"><table>
           <thead><tr>${cab}</tr></thead>
           <tbody>${corpo}</tbody>
@@ -679,8 +731,13 @@ async function renderOrcado() {
       + tabela("Receitas", j.receitas || [], true) + tabela("Despesas", j.despesas || [], false)
       + (!temAlgo ? aviso : "");
     $("#orcAnoSel").addEventListener("change", (e) => { state.orcAno = +e.target.value; renderOrcado(); });
-    $$("[data-omes]").forEach((b) => b.addEventListener("click", () => { state.orcMes = +b.dataset.omes; renderOrcado(); }));
+    $$("[data-omes]").forEach((b) => b.addEventListener("click", () => { state.orcMes = +b.dataset.omes; desenharOrcado(); }));
     $$("[data-obase]").forEach((b) => b.addEventListener("click", () => { state.orcBase = b.dataset.obase; renderOrcado(); }));
+    $$("[data-orctoggle]").forEach((td) => td.addEventListener("click", () => {
+      const k = td.dataset.orctoggle;
+      state.orcAberto.has(k) ? state.orcAberto.delete(k) : state.orcAberto.add(k);
+      desenharOrcado();
+    }));
   } catch (e) { erro(e); }
 }
 
