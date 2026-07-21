@@ -54,6 +54,7 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
                              "ListarContasCorrentes", registros_por_pagina=50)
     linhas = [{
         "empresa_id": empresa_id,
+        "empresa_real": holding.empresa_real(empresa_id, c.get("descricao") or ""),
         "ncodcc": c.get("nCodCC"),
         "descricao": c.get("descricao") or "",
         "tipo": c.get("tipo") or c.get("tipo_conta_corrente") or "",
@@ -64,12 +65,30 @@ def sincronizar_empresa(db, empresa_cfg, status=None):
         "saldo_inicial": num(c.get("saldo_inicial")),
     } for c in contas]
     db.substituir("conta_corrente", empresa_id, linhas,
-                  ["empresa_id", "ncodcc", "descricao", "tipo", "codigo_banco",
+                  ["empresa_id", "empresa_real", "ncodcc", "descricao", "tipo", "codigo_banco",
                    "agencia", "numero", "inativo", "saldo_inicial"])
     # mapa conta -> empresa real (divide holding ROI por prefixo [Empresa])
     mapa_cc = {c.get("nCodCC"): (c.get("descricao") or "") for c in contas}
     resumo["contas_correntes"] = len(linhas)
     passo("%d contas bancarias." % len(linhas))
+
+    # 2b) Saldo atual de cada conta ativa (ListarExtrato so-saldo)
+    hoje = datetime.now().strftime("%d/%m/%Y")
+    saldos = []
+    ativas = [l for l in linhas if str(l["inativo"]).upper() != "S" and l["ncodcc"]]
+    for i, l in enumerate(ativas):
+        passo("Saldo das contas: %d/%d" % (i + 1, len(ativas)))
+        try:
+            r = cli.chamar("financas/extrato/", "ListarExtrato",
+                           {"nCodCC": l["ncodcc"], "dPeriodoInicial": hoje, "dPeriodoFinal": hoje,
+                            "cExibirApenasSaldo": "S"})
+        except OmieError:
+            continue   # conta sem extrato disponivel — mantem o saldo anterior
+        saldos.append({"ncodcc": l["ncodcc"], "saldo_atual": num(r.get("nSaldoAtual")),
+                       "saldo_data": _agora()})
+    db.atualizar_saldos(empresa_id, saldos)
+    resumo["saldos"] = len(saldos)
+    passo("%d saldos de conta." % len(saldos))
 
     # 3) Categorias
     passo("Buscando plano de categorias...")

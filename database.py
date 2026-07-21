@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS empresa (
 
 CREATE TABLE IF NOT EXISTS conta_corrente (
     empresa_id    TEXT,
+    empresa_real  TEXT,     -- holding dividida pelo prefixo [Empresa] da descricao
     ncodcc        {INT},
     descricao     TEXT,
     tipo          TEXT,
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS conta_corrente (
     numero        TEXT,
     inativo       TEXT,
     saldo_inicial {REAL},
+    saldo_atual   {REAL},   -- nSaldoAtual do ListarExtrato (ultima sincronizacao)
+    saldo_data    TEXT,
     PRIMARY KEY (empresa_id, ncodcc)
 );
 
@@ -315,6 +318,23 @@ class DB:
         self._migrar()
 
     def _migrar(self):
+        """Migracao leve e idempotente: adiciona colunas novas a bancos ja existentes.
+        (ALTER TABLE ... ADD COLUMN tem a mesma sintaxe no SQLite e no Postgres; se a
+        coluna ja existe, o erro e engolido.)"""
+        real = "DOUBLE PRECISION" if self.pg else "REAL"
+        for sql in (
+            "ALTER TABLE conta_corrente ADD COLUMN empresa_real TEXT",
+            "ALTER TABLE conta_corrente ADD COLUMN saldo_atual %s" % real,
+            "ALTER TABLE conta_corrente ADD COLUMN saldo_data TEXT",
+        ):
+            try:
+                with self._tx() as t:
+                    t.exec(sql)
+            except Exception:  # noqa: BLE001 - coluna ja existe
+                pass
+        self._migrar()
+
+    def _migrar(self):
         """Migracao leve: adiciona colunas novas a bancos ja criados (idempotente)."""
         for alter in ("ALTER TABLE orcamento ADD COLUMN empresa_real TEXT",):
             try:
@@ -411,8 +431,11 @@ class DB:
             for cred in holding.CREDENCIAIS_HOLDING:
                 contas = t.exec("SELECT ncodcc, descricao FROM conta_corrente WHERE empresa_id=?", (cred,)).fetchall()
                 for c in contas:
+                    emp = holding.empresa_real(cred, c["descricao"])
                     t.exec("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND ncodcc=?",
-                           (holding.empresa_real(cred, c["descricao"]), cred, c["ncodcc"]))
+                           (emp, cred, c["ncodcc"]))
+                    t.exec("UPDATE conta_corrente SET empresa_real=? WHERE empresa_id=? AND ncodcc=?",
+                           (emp, cred, c["ncodcc"]))
                 t.exec("UPDATE titulo SET empresa_real=? WHERE empresa_id=? AND (empresa_real IS NULL OR empresa_real='')",
                        (cred, cred))
                 # orcamento da holding: prefixo [Empresa] vem da descricao da categoria
@@ -426,6 +449,28 @@ class DB:
                            (holding.empresa_real(cred, o["descricao"]), cred, o["cod"]))
             t.exec("UPDATE titulo SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
             t.exec("UPDATE orcamento SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
+            t.exec("UPDATE conta_corrente SET empresa_real=empresa_id WHERE empresa_real IS NULL OR empresa_real=''")
+
+    def atualizar_saldos(self, empresa_id, saldos):
+        """Grava o saldo atual das contas (lista de dicts ncodcc/saldo_atual/saldo_data)."""
+        with self._tx() as t:
+            for s in saldos:
+                t.exec("UPDATE conta_corrente SET saldo_atual=?, saldo_data=? WHERE empresa_id=? AND ncodcc=?",
+                       (s["saldo_atual"], s["saldo_data"], empresa_id, s["ncodcc"]))
+
+    def contas_saldos(self, empresas):
+        """Contas bancarias ativas com o saldo atual, filtradas por empresa_real."""
+        ph, params = _in("cc.empresa_real", empresas)
+        cond = ("AND " + ph) if ph else ""
+        rows = self._query(
+            """SELECT cc.empresa_id, cc.empresa_real, cc.ncodcc, cc.descricao, cc.tipo,
+                      cc.codigo_banco, cc.saldo_atual, cc.saldo_data,
+                      COALESCE(NULLIF(e.razao_social,''), NULLIF(e.nome,''), cc.empresa_real) AS empresa_nome
+               FROM conta_corrente cc
+               LEFT JOIN empresa e ON e.empresa_id = cc.empresa_real
+               WHERE UPPER(COALESCE(cc.inativo,'N')) <> 'S' %s
+               ORDER BY empresa_nome, cc.descricao""" % cond, params)
+        return [dict(r) for r in rows]
 
     def substituir_rateio(self, empresa_id, tipo, linhas):
         """Full refresh do rateio por departamento dos titulos de uma empresa/tipo."""

@@ -398,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._enviar_json(self._dashboard(self._filtros(qs)))
         if caminho == "/api/dre":
             return self._enviar_json(db.dre(self._filtros(qs)))
+        if caminho == "/api/contas":
+            return self._enviar_json({"contas": db.contas_saldos(self._filtros(qs)["empresas"])})
         if caminho == "/api/orcado":
             try:
                 ano = int(qs.get("ano", [""])[0] or datetime.now().year)

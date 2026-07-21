@@ -213,6 +213,11 @@ function aplicarContexto() {
     $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; ${txt}`;
     return;
   }
+  if (state.view === "conta") {
+    const c = contexto();
+    $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Saldo atual de cada conta bancária (OMIE, na última sincronização)`;
+    return;
+  }
   const c = contexto();
   $("#pageContext").innerHTML = `<b>${esc(c.emp)}</b> &nbsp;·&nbsp; Conta: ${esc(c.contas)} &nbsp;·&nbsp; ${esc(c.periodo)}`;
 }
@@ -248,20 +253,21 @@ function render() {
   const v = state.view;
   $$("#nav button").forEach((b) => b.classList.toggle("ativa", b.dataset.view === v));
   const ehAdmin = v === "admin";
-  const semToolbar = ehAdmin || v === "orcado";   // orcado tem período próprio (ano/mês)
+  const semToolbar = ehAdmin || v === "orcado" || v === "conta";   // telas com escopo próprio
   document.querySelector(".toolbar").style.display = semToolbar ? "none" : "";
-  $("#empresasSel").style.display = ehAdmin ? "none" : "";   // filtro de empresas vale também no orcado
+  $("#empresasSel").style.display = ehAdmin ? "none" : "";   // filtro de empresas vale em todas
   $("#btnExportar").style.display = semToolbar ? "none" : "";
   $("#btnImprimir").style.display = ehAdmin ? "none" : "";
   aplicarContexto();
   if (ehAdmin) { $("#chipsAtivos").innerHTML = ""; return renderAdmin(); }
   if (v === "orcado") { $("#chipsAtivos").innerHTML = ""; return renderOrcado(); }
+  if (v === "conta") { $("#chipsAtivos").innerHTML = ""; return renderContas(); }
   desenharChipsAtivos();
   if (v === "dashboard") return renderDashboard();
   if (v === "dre") return renderDre();
   if (v === "titulos") return renderTitulos();
   if (v === "fluxo") return renderFluxo();
-  return renderAgrupado(v);   // categoria | conta | cliente
+  return renderAgrupado(v);   // categoria | departamento
 }
 function erro(e) { $(REL_ALVO).innerHTML = `<div class="erro-box">⚠ ${esc(e.message || e)}</div>`; }
 function vazioBloco(msg) { return `<div class="vazio"><div class="ic">${ic("inbox")}</div><div>${esc(msg)}</div></div>`; }
@@ -551,6 +557,48 @@ async function renderDre() {
         ${totalRow("Total de Despesas", d.total_despesas, "neg")}
         ${resRow}
       </tbody></table></div>`;
+  } catch (e) { erro(e); }
+}
+
+// ===================================================== CONTAS (saldo atual)
+async function renderContas() {
+  $(REL_ALVO).innerHTML = skeleton();
+  try {
+    const j = await api("/api/contas");
+    const contas = j.contas || [];
+    if (!contas.length) {
+      $(REL_ALVO).innerHTML = `<div class="panel"><div class="panel-body">${vazioBloco("Nenhuma conta bancária para esta seleção.")}</div></div>`;
+      return;
+    }
+    const comSaldo = contas.filter((c) => c.saldo_atual != null);
+    const total = comSaldo.reduce((s, c) => s + (c.saldo_atual || 0), 0);
+    const negativas = comSaldo.filter((c) => (c.saldo_atual || 0) < 0);
+    const ultima = comSaldo.map((c) => c.saldo_data).filter(Boolean).sort().pop();
+
+    const kpis = `<div class="grid cols-3" style="margin-bottom:16px">
+      <div class="kpi"><div class="topo"><span class="rotulo">Saldo total</span><span class="ic ${total >= 0 ? "verde" : "vermelho"}">${ic("saldo")}</span></div>
+        <div class="valor ${classeValor(total)}">${moedaCurta(total)}</div>
+        <div class="nota">${contas.length} conta(s) ativa(s)</div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Contas negativas</span><span class="ic ${negativas.length ? "vermelho" : "verde"}">${ic("pagar")}</span></div>
+        <div class="valor ${negativas.length ? "neg" : "pos"}" style="font-size:24px">${negativas.length}</div>
+        <div class="nota">${negativas.length ? "somam <b class='neg'>" + moedaCurta(negativas.reduce((s, c) => s + c.saldo_atual, 0)) + "</b>" : "nenhuma 🎉"}</div></div>
+      <div class="kpi"><div class="topo"><span class="rotulo">Saldos atualizados em</span><span class="ic">${ic("clock")}</span></div>
+        <div class="valor" style="font-size:19px">${esc(ultima || "—")}</div>
+        <div class="nota">na última sincronização</div></div>
+    </div>`;
+
+    const linhas = contas.map((c) => `<tr>
+      <td class="cinza">${esc(c.empresa_nome || c.empresa_real)}</td>
+      <td class="forte">${esc(c.descricao || ("Conta " + c.ncodcc))}</td>
+      <td class="cinza">${esc(c.codigo_banco || "—")}</td>
+      <td class="num dinheiro ${c.saldo_atual == null ? "cinza" : classeValor(c.saldo_atual)}">${c.saldo_atual == null ? "sincronize p/ buscar" : moeda(c.saldo_atual)}</td>
+    </tr>`).join("");
+    const aviso = comSaldo.length ? "" : `<div class="sub" style="margin-bottom:10px;color:var(--muted)">Os saldos ainda não foram buscados — clique em <b>Sincronizar</b>.</div>`;
+    $(REL_ALVO).innerHTML = kpis + aviso + `<div class="tabela-wrap"><table>
+      <thead><tr><th>Empresa</th><th>Conta</th><th>Banco</th><th class="num">Saldo atual</th></tr></thead>
+      <tbody>${linhas}</tbody>
+      <tfoot><tr><td colspan="3">TOTAL · ${contas.length} conta(s)</td><td class="num ${classeValor(total)}">${moeda(total)}</td></tr></tfoot>
+    </table></div>`;
   } catch (e) { erro(e); }
 }
 
